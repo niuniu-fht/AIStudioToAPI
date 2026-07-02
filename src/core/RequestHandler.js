@@ -180,6 +180,137 @@ class RequestHandler {
         );
     }
 
+    _resolveOpenAIImageAspectRatio(size) {
+        const normalizedSize = String(size || "")
+            .trim()
+            .toLowerCase();
+        const match = normalizedSize.match(/^(\d+)x(\d+)$/);
+        if (!match) return "1:1";
+
+        const width = Number(match[1]);
+        const height = Number(match[2]);
+        if (!width || !height) return "1:1";
+
+        const ratio = width / height;
+        const candidates = [
+            { aspectRatio: "1:1", ratio: 1 },
+            { aspectRatio: "16:9", ratio: 16 / 9 },
+            { aspectRatio: "9:16", ratio: 9 / 16 },
+            { aspectRatio: "4:3", ratio: 4 / 3 },
+            { aspectRatio: "3:4", ratio: 3 / 4 },
+        ];
+
+        return candidates.reduce((best, current) =>
+            Math.abs(current.ratio - ratio) < Math.abs(best.ratio - ratio) ? current : best
+        ).aspectRatio;
+    }
+
+    _normalizeOpenAIImageResponseFormat(value) {
+        const normalized = String(value || "")
+            .trim()
+            .toLowerCase();
+        if (normalized === "b64_json") return "b64_json";
+        if (normalized === "url") return "url";
+        return this._isImageUrlResponseMode() ? "url" : "b64_json";
+    }
+
+    _buildGeminiRequestFromOpenAIImages(openAIImagesBody) {
+        const body = openAIImagesBody || {};
+        const rawPrompt = body.prompt;
+        const prompt = Array.isArray(rawPrompt) ? rawPrompt.join("\n") : String(rawPrompt || "").trim();
+        const rawModel = String(body.model || "gemini-3.1-flash-image").trim();
+        const initialTarget = this._splitGenerationModelOperation(rawModel);
+        const mappedTarget = this._resolveMappedGenerationTarget(
+            initialTarget.model,
+            initialTarget.operation || "generateContent"
+        );
+        const aspectRatio = this._resolveOpenAIImageAspectRatio(body.size);
+        const responseFormat = this._normalizeOpenAIImageResponseFormat(body.response_format);
+        const n = Math.max(1, Math.min(Number.parseInt(body.n, 10) || 1, 4));
+
+        const generationConfig = {
+            imageConfig: {
+                aspectRatio,
+            },
+            responseModalities: ["IMAGE", "TEXT"],
+        };
+
+        if (n > 1) {
+            generationConfig.candidateCount = n;
+        }
+
+        const googleRequest = {
+            contents: [
+                {
+                    parts: [{ text: prompt }],
+                    role: "user",
+                },
+            ],
+            generationConfig,
+        };
+
+        return {
+            aspectRatio,
+            googleRequest,
+            model: mappedTarget.model,
+            operation: mappedTarget.operation || "generateContent",
+            prompt,
+            requestedCount: n,
+            responseFormat,
+            size: body.size || "1024x1024",
+        };
+    }
+
+    _collectGeminiInlineImages(value, images = []) {
+        if (Array.isArray(value)) {
+            value.forEach(item => this._collectGeminiInlineImages(item, images));
+            return images;
+        }
+
+        if (!value || typeof value !== "object") {
+            return images;
+        }
+
+        if (value.inlineData) {
+            images.push(value.inlineData);
+        }
+
+        Object.values(value).forEach(item => this._collectGeminiInlineImages(item, images));
+        return images;
+    }
+
+    _convertGeminiNativeToOpenAIImages(responseBodyBuffer, req, responseFormat) {
+        const parsedBody = JSON.parse(responseBodyBuffer.toString());
+        this._stripThoughtSignature(parsedBody);
+
+        let workingBody = parsedBody;
+        if (responseFormat === "url") {
+            const transformedBuffer = this._transformGeminiNativeResponseBuffer(
+                Buffer.from(JSON.stringify(parsedBody)),
+                req
+            );
+            workingBody = JSON.parse(transformedBuffer.toString());
+        }
+
+        const images = this._collectGeminiInlineImages(workingBody);
+        const data = images.map(image => {
+            if (responseFormat === "url") {
+                return {
+                    url: image.fileUri,
+                };
+            }
+
+            return {
+                b64_json: image.data,
+            };
+        });
+
+        return {
+            created: Math.floor(Date.now() / 1000),
+            data,
+        };
+    }
+
     _categorizeRequest(pathValue, fallback = "request") {
         if (typeof pathValue !== "string") return fallback;
         if (
@@ -949,6 +1080,157 @@ class RequestHandler {
         }
 
         return recoverySuccess;
+    }
+
+    async processOpenAIImagesRequest(req, res) {
+        const requestId = this._generateRequestId();
+        this._startTrackedRequest(requestId, req, {
+            apiFormat: "openai",
+            isStreaming: false,
+            requestCategory: "image",
+            streamMode: null,
+        });
+        this._setResponseApiFormat(res, "openai");
+        res.__proxyResponseStreamMode = null;
+
+        try {
+            this.logger.info(`[OpenAI图片] 收到 OpenAI Images 生成请求，请求ID：${requestId}`);
+
+            if (!(await this._ensureBrowserBackedRequestReady(res, { waitErrorType: "service_unavailable" }))) {
+                return;
+            }
+
+            let converted;
+            try {
+                converted = this._buildGeminiRequestFromOpenAIImages(req.body);
+            } catch (error) {
+                this.logger.error(`[OpenAI图片] 请求参数转换失败：${error.message}，请求ID：${requestId}`);
+                return this._sendErrorResponse(res, 400, "Invalid OpenAI images request.", "invalid_request_error");
+            }
+
+            if (!converted.prompt) {
+                this.logger.warn(`[OpenAI图片] 请求缺少 prompt，请求ID：${requestId}`);
+                return this._sendErrorResponse(res, 400, "prompt is required", "invalid_request_error");
+            }
+
+            const usageCount = this.authSwitcher.incrementUsageCount();
+            if (usageCount > 0) {
+                const rotationCountText =
+                    this.config.switchOnUses > 0 ? `${usageCount}/${this.config.switchOnUses}` : `${usageCount}`;
+                this.logger.info(
+                    `[OpenAI图片] 账号调用计数：${rotationCountText}，当前账号：${this.currentAuthIndex}，请求ID：${requestId}`
+                );
+                if (this.authSwitcher.shouldSwitchByUsage()) {
+                    this.needsSwitchingAfterRequest = true;
+                }
+            }
+
+            if (converted.operation !== "generateContent") {
+                this.logger.info(
+                    `[OpenAI图片] 图片接口强制使用 generateContent，原目标：${converted.model}:${converted.operation}，请求ID：${requestId}`
+                );
+                converted.operation = "generateContent";
+            }
+
+            const proxyRequest = {
+                body: JSON.stringify(converted.googleRequest),
+                headers: { "Content-Type": "application/json" },
+                is_generative: true,
+                method: "POST",
+                path: `/v1beta/models/${converted.model}:generateContent`,
+                query_params: {},
+                request_id: requestId,
+                streaming_mode: "fake",
+            };
+            this._initializeProxyRequestAttempt(proxyRequest);
+            this._updateTrackedRequest(requestId, {
+                isStreaming: false,
+                model: converted.model,
+                path: proxyRequest.path,
+                requestCategory: "image",
+                streamMode: null,
+            });
+
+            this.logger.info(
+                `[OpenAI图片] 已转换为 Gemini 请求：model=${converted.model}, aspectRatio=${converted.aspectRatio}, responseFormat=${converted.responseFormat}, n=${converted.requestedCount}，请求ID：${requestId}`
+            );
+
+            try {
+                const messageQueue = this.connectionRegistry.createMessageQueue(
+                    requestId,
+                    this.currentAuthIndex,
+                    proxyRequest.request_attempt_id
+                );
+                this._setupClientDisconnectHandler(res, requestId);
+
+                const result = await this._executeRequestWithRetries(proxyRequest, messageQueue);
+                if (!result.success) {
+                    this._logFinalRequestFailure(result.error, "OpenAI Images", requestId);
+                    if (!result.error.skipAccountSwitch && !this._isConnectionResetError(result.error)) {
+                        await this.authSwitcher.handleRequestFailureAndSwitch(result.error, null);
+                    }
+                    return this._sendErrorResponse(res, result.error.status || 500, result.error.message);
+                }
+
+                if (this.authSwitcher.failureCount > 0) {
+                    this.logger.debug(
+                        `✅ [OpenAI图片] 图片生成成功，失败计数从 ${this.authSwitcher.failureCount} 重置为 0`
+                    );
+                    this.authSwitcher.failureCount = 0;
+                }
+
+                const chunks = [];
+                let receiving = true;
+                while (receiving) {
+                    const message = await result.queue.dequeue(this.timeouts.FAKE_STREAM);
+                    if (message.type === "STREAM_END") {
+                        receiving = false;
+                        break;
+                    }
+
+                    if (message.event_type === "error") {
+                        this.logger.error(`[OpenAI图片] Gemini 返回错误：${message.message}，请求ID：${requestId}`);
+                        this._markTrackedResponseError(res, message.message, 500);
+                        return this._sendErrorResponse(res, 500, message.message);
+                    }
+
+                    if (message.event_type === "chunk" && message.data) {
+                        chunks.push(Buffer.from(message.data));
+                    }
+                }
+
+                const responseBodyBuffer = Buffer.concat(chunks);
+                const openAIImagesResponse = this._convertGeminiNativeToOpenAIImages(
+                    responseBodyBuffer,
+                    req,
+                    converted.responseFormat
+                );
+
+                this.logger.info(
+                    `[OpenAI图片] Gemini 响应已转换为 OpenAI Images 格式，图片数量：${openAIImagesResponse.data.length}，请求ID：${requestId}`
+                );
+
+                res.type("application/json").send(JSON.stringify(openAIImagesResponse));
+            } catch (error) {
+                this._handleQueueTimeout(error, requestId);
+                this.logger.error(`[OpenAI图片] 请求处理失败：${error.message}，请求ID：${requestId}`);
+                this._handleRequestError(error, res, requestId);
+            } finally {
+                this.connectionRegistry.removeMessageQueue(requestId, "request_complete");
+                if (this.needsSwitchingAfterRequest) {
+                    this.logger.info(
+                        `[OpenAI图片] 调用计数达到切换阈值（${this.authSwitcher.usageCount}/${this.config.switchOnUses}），将在后台切换账号...`
+                    );
+                    this.authSwitcher.switchToNextAuth().catch(err => {
+                        this.logger.error(`[OpenAI图片] 后台账号切换失败：${err.message}`);
+                    });
+                    this.needsSwitchingAfterRequest = false;
+                }
+                if (!res.writableEnded) res.end();
+            }
+        } finally {
+            this._finalizeTrackedRequest(requestId, res);
+        }
     }
 
     // Process standard Google API requests
