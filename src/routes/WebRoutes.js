@@ -10,6 +10,7 @@ const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
 const path = require("path");
 const AuthRoutes = require("./AuthRoutes");
+const ManagementRoutes = require("./ManagementRoutes");
 const StatusRoutes = require("./StatusRoutes");
 
 /**
@@ -27,6 +28,7 @@ class WebRoutes {
 
         // Initialize specialized route handlers
         this.authRoutes = new AuthRoutes(serverSystem);
+        this.managementRoutes = new ManagementRoutes(serverSystem);
         this.statusRoutes = new StatusRoutes(serverSystem);
     }
 
@@ -61,6 +63,7 @@ class WebRoutes {
         // Setup all route handlers
         this.authRoutes.setupRoutes(app);
         this.statusRoutes.setupRoutes(app, this.authRoutes.isAuthenticated.bind(this.authRoutes));
+        this.managementRoutes.setupRoutes(app, this.authRoutes.isAuthenticated.bind(this.authRoutes));
     }
 }
 

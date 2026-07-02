@@ -1,0 +1,20 @@
+name: aistudio-to-api
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aistudio-to-api:local
+    container_name: aistudio-to-api
+    ports:
+      - 7860:7860
+    restart: unless-stopped
+    volumes:
+      - ./auth:/app/configs/auth
+      - ./data:/app/data
+    environment:
+      API_KEYS: Alita99.
+      IMAGE_RESPONSE_MODE: url
+      STRIP_THOUGHT_SIGNATURE: "true"
+      GENERATED_IMAGE_BASE_URL: http://nana.code2alita.com

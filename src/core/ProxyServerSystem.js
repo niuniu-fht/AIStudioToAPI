@@ -21,6 +21,8 @@ const BrowserManager = require("./BrowserManager");
 const ConnectionRegistry = require("./ConnectionRegistry");
 const RequestHandler = require("./RequestHandler");
 const UsageStatsService = require("./UsageStatsService");
+const GeneratedImageService = require("./GeneratedImageService");
+const ModelMappingService = require("./ModelMappingService");
 const ConfigLoader = require("../utils/ConfigLoader");
 const WebRoutes = require("../routes/WebRoutes");
 
@@ -37,6 +39,8 @@ class ProxyServerSystem extends EventEmitter {
         this.config = configLoader.loadConfiguration();
 
         this.authSource = new AuthSource(this.logger);
+        this.modelMappingService = new ModelMappingService(this.logger, this.config);
+        this.generatedImageService = new GeneratedImageService(this.logger);
         this.browserManager = new BrowserManager(this.logger, this.config, this.authSource);
         this.usageStatsService = new UsageStatsService(
             this.authSource,
@@ -450,6 +454,11 @@ class ProxyServerSystem extends EventEmitter {
 
         // Serve additional public assets under ui/public
         app.use(express.static(path.join(__dirname, "..", "..", "ui", "public")));
+
+        app.use(
+            "/generated-images",
+            express.static(process.env.GENERATED_IMAGE_DIR || path.join(process.cwd(), "data", "generated-images"))
+        );
 
         // Serve locales for front-end only translations
         app.use("/locales", express.static(path.join(__dirname, "..", "..", "ui", "locales")));

@@ -13,6 +13,9 @@ const AuthSwitcher = require("../auth/AuthSwitcher");
 const FormatConverter = require("./FormatConverter");
 const { isUserAbortedError } = require("../utils/CustomErrors");
 const { QueueClosedError, QueueTimeoutError } = require("../utils/MessageQueue");
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 const WS_RECONNECT_WAIT_MS = 130000;
 const WS_CONNECTION_READY_TIMEOUT_MS = 10000;
@@ -21,6 +24,13 @@ const WS_CONNECTION_READY_TIMEOUT_MS = 10000;
 const DEFAULT_TIMEOUTS = {
     FAKE_STREAM: 300000, // 300 seconds (5 minutes) - timeout for fake streaming (buffered response)
     STREAM_CHUNK: 60000, // 60 seconds - timeout between stream chunks
+};
+
+const DEFAULT_GENERATED_IMAGE_ROUTE = "/generated-images";
+const GENERATED_IMAGE_EXTENSIONS = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
 };
 
 class RequestHandler {
@@ -87,6 +97,60 @@ class RequestHandler {
 
         const match = pathValue.match(/\/models\/([^:/?]+)(?::|$)/);
         return match?.[1] || null;
+    }
+
+    _splitGenerationModelOperation(value) {
+        const normalized = String(value || "")
+            .trim()
+            .replace(/^models\//, "");
+        const match = normalized.match(/^(.+):(generateContent|streamGenerateContent)$/);
+
+        if (!match) {
+            return {
+                model: normalized,
+                operation: null,
+            };
+        }
+
+        return {
+            model: match[1],
+            operation: match[2],
+        };
+    }
+
+    _resolveMappedGenerationTarget(model, operation) {
+        if (!this.serverSystem.modelMappingService || !model || !operation) {
+            return {
+                changed: false,
+                model,
+                operation,
+            };
+        }
+
+        const explicitSource = this._splitGenerationModelOperation(model);
+        const sourceModelOperation = explicitSource.operation ? model : `${model}:${operation}`;
+        const resolved = this.serverSystem.modelMappingService.resolveModelOperation(sourceModelOperation);
+        if (!resolved.changed) {
+            return {
+                changed: false,
+                model: explicitSource.model,
+                operation: explicitSource.operation || operation,
+            };
+        }
+
+        const target = this._splitGenerationModelOperation(resolved.targetModel);
+        const mappedModel = target.model;
+        const mappedOperation = target.operation || explicitSource.operation || operation;
+
+        this.logger.info(
+            `[ModelMapping] Applied generation mapping: ${resolved.sourceModel} -> ${resolved.targetModel}`
+        );
+
+        return {
+            changed: true,
+            model: mappedModel,
+            operation: mappedOperation,
+        };
     }
 
     _convertEmbedContentBodyToBatch(bodyObj, modelName) {
@@ -1180,15 +1244,17 @@ class RequestHandler {
             const effectiveStreamMode = modelStreamingMode || systemStreamMode;
             const useRealStream = isOpenAIStream && effectiveStreamMode === "real";
             const googleEndpoint = useRealStream ? "streamGenerateContent" : "generateContent";
+            const mappedTarget = this._resolveMappedGenerationTarget(model, googleEndpoint);
+            model = mappedTarget.model;
             const proxyRequest = {
                 body: JSON.stringify(googleBody),
                 headers: { "Content-Type": "application/json" },
                 is_generative: true,
                 method: "POST",
-                path: `/v1beta/models/${model}:${googleEndpoint}`,
-                query_params: useRealStream ? { alt: "sse" } : {},
+                path: `/v1beta/models/${model}:${mappedTarget.operation}`,
+                query_params: mappedTarget.operation === "streamGenerateContent" ? { alt: "sse" } : {},
                 request_id: requestId,
-                streaming_mode: useRealStream ? "real" : "fake",
+                streaming_mode: mappedTarget.operation === "streamGenerateContent" && useRealStream ? "real" : "fake",
             };
             this._initializeProxyRequestAttempt(proxyRequest);
             res.__proxyResponseStreamMode = isOpenAIStream ? (useRealStream ? "real" : "fake") : null;
@@ -1583,15 +1649,17 @@ class RequestHandler {
             const useRealStream = isOpenAIStream && effectiveStreamMode === "real";
 
             const googleEndpoint = useRealStream ? "streamGenerateContent" : "generateContent";
+            const mappedTarget = this._resolveMappedGenerationTarget(model, googleEndpoint);
+            model = mappedTarget.model;
             const proxyRequest = {
                 body: JSON.stringify(googleBody),
                 headers: { "Content-Type": "application/json" },
                 is_generative: true,
                 method: "POST",
-                path: `/v1beta/models/${model}:${googleEndpoint}`,
-                query_params: useRealStream ? { alt: "sse" } : {},
+                path: `/v1beta/models/${model}:${mappedTarget.operation}`,
+                query_params: mappedTarget.operation === "streamGenerateContent" ? { alt: "sse" } : {},
                 request_id: requestId,
-                streaming_mode: useRealStream ? "real" : "fake",
+                streaming_mode: mappedTarget.operation === "streamGenerateContent" && useRealStream ? "real" : "fake",
             };
             this._initializeProxyRequestAttempt(proxyRequest);
             res.__proxyResponseStreamMode = isOpenAIStream ? (useRealStream ? "real" : "fake") : null;
@@ -1955,15 +2023,17 @@ class RequestHandler {
             const useRealStream = isClaudeStream && effectiveStreamMode === "real";
 
             const googleEndpoint = useRealStream ? "streamGenerateContent" : "generateContent";
+            const mappedTarget = this._resolveMappedGenerationTarget(model, googleEndpoint);
+            model = mappedTarget.model;
             const proxyRequest = {
                 body: JSON.stringify(googleBody),
                 headers: { "Content-Type": "application/json" },
                 is_generative: true,
                 method: "POST",
-                path: `/v1beta/models/${model}:${googleEndpoint}`,
-                query_params: useRealStream ? { alt: "sse" } : {},
+                path: `/v1beta/models/${model}:${mappedTarget.operation}`,
+                query_params: mappedTarget.operation === "streamGenerateContent" ? { alt: "sse" } : {},
                 request_id: requestId,
-                streaming_mode: useRealStream ? "real" : "fake",
+                streaming_mode: mappedTarget.operation === "streamGenerateContent" && useRealStream ? "real" : "fake",
             };
             this._initializeProxyRequestAttempt(proxyRequest);
             res.__proxyResponseStreamMode = isClaudeStream ? (useRealStream ? "real" : "fake") : null;
@@ -3177,6 +3247,8 @@ class RequestHandler {
                 }
             }
 
+            responseBodyBuffer = this._transformGeminiNativeResponseBuffer(responseBodyBuffer, req);
+
             this._setResponseHeaders(res, headerMessage, req);
 
             // Ensure Content-Type is set (Express defaults Buffer to application/octet-stream)
@@ -3195,6 +3267,124 @@ class RequestHandler {
     }
 
     // === Helper Methods ===
+
+    _buildGeneratedImageUrl(filename, req) {
+        const configuredBaseUrl = String(process.env.GENERATED_IMAGE_BASE_URL || "").replace(/\/+$/, "");
+        const routePath = DEFAULT_GENERATED_IMAGE_ROUTE;
+
+        if (configuredBaseUrl) {
+            return `${configuredBaseUrl}${routePath}/${filename}`;
+        }
+
+        const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+        const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${this.config.port || 7860}`;
+        return `${protocol}://${host}${routePath}/${filename}`;
+    }
+
+    _getGeneratedImagesDir() {
+        return process.env.GENERATED_IMAGE_DIR || path.join(process.cwd(), "data", "generated-images");
+    }
+
+    _getImageExtension(mimeType) {
+        return GENERATED_IMAGE_EXTENSIONS[String(mimeType || "").toLowerCase()] || "bin";
+    }
+
+    _isImageUrlResponseMode() {
+        return String(process.env.IMAGE_RESPONSE_MODE || "").toLowerCase() === "url";
+    }
+
+    _shouldStripThoughtSignature() {
+        return String(process.env.STRIP_THOUGHT_SIGNATURE || "").toLowerCase() === "true";
+    }
+
+    _stripThoughtSignature(value) {
+        if (Array.isArray(value)) {
+            value.forEach(item => this._stripThoughtSignature(item));
+            return;
+        }
+
+        if (value && typeof value === "object") {
+            delete value.thoughtSignature;
+            Object.values(value).forEach(item => this._stripThoughtSignature(item));
+        }
+    }
+
+    _storeInlineImage(inlineData, req) {
+        if (!inlineData?.data || typeof inlineData.data !== "string") {
+            return false;
+        }
+
+        const imageBuffer = Buffer.from(inlineData.data, "base64");
+        const digest = crypto.createHash("sha256").update(imageBuffer).digest("hex").slice(0, 16);
+        const extension = this._getImageExtension(inlineData.mimeType);
+        const filename = `${Date.now()}-${digest}.${extension}`;
+        const imageDir = this._getGeneratedImagesDir();
+        const imagePath = path.join(imageDir, filename);
+
+        fs.mkdirSync(imageDir, { recursive: true });
+        fs.writeFileSync(imagePath, imageBuffer);
+
+        inlineData.fileUri = this._buildGeneratedImageUrl(filename, req);
+        inlineData.dataRemoved = true;
+        delete inlineData.data;
+
+        return true;
+    }
+
+    _replaceInlineImageDataWithUrls(value, req) {
+        let storedCount = 0;
+
+        const visit = item => {
+            if (Array.isArray(item)) {
+                item.forEach(visit);
+                return;
+            }
+
+            if (!item || typeof item !== "object") {
+                return;
+            }
+
+            if (item.inlineData?.data) {
+                if (this._storeInlineImage(item.inlineData, req)) {
+                    storedCount++;
+                }
+            }
+
+            Object.values(item).forEach(visit);
+        };
+
+        visit(value);
+        return storedCount;
+    }
+
+    _transformGeminiNativeResponseBuffer(responseBodyBuffer, req) {
+        const shouldStripThoughtSignature = this._shouldStripThoughtSignature();
+        const shouldReplaceImageData = this._isImageUrlResponseMode();
+
+        if (!shouldStripThoughtSignature && !shouldReplaceImageData) {
+            return responseBodyBuffer;
+        }
+
+        try {
+            const parsedBody = JSON.parse(responseBodyBuffer.toString());
+
+            if (shouldStripThoughtSignature) {
+                this._stripThoughtSignature(parsedBody);
+            }
+
+            if (shouldReplaceImageData) {
+                const storedCount = this._replaceInlineImageDataWithUrls(parsedBody, req);
+                if (storedCount > 0) {
+                    this.logger.info(`[Proxy] Stored ${storedCount} inline image(s) and replaced base64 with URL(s).`);
+                }
+            }
+
+            return Buffer.from(JSON.stringify(parsedBody));
+        } catch (error) {
+            this.logger.warn(`[Proxy] Failed to transform Gemini native response: ${error.message}`);
+            return responseBodyBuffer;
+        }
+    }
 
     _processImageInResponse(fullBody) {
         try {
@@ -4144,10 +4334,18 @@ class RequestHandler {
 
         this.logger.debug(`[Proxy] Debug: incoming Gemini Body (Google Native) = ${JSON.stringify(bodyObj, null, 2)}`);
 
+        const mappedPath = this.serverSystem.modelMappingService?.resolveGenerationPath(cleanPath);
+        if (mappedPath?.changed) {
+            this.logger.info(
+                `[ModelMapping] Applied native path mapping: ${mappedPath.sourceModel} -> ${mappedPath.targetModel}`
+            );
+            cleanPath = mappedPath.path;
+        }
+
         // Parse model suffixes from model name in native Gemini generation requests
         // Only handle generation requests: /v1beta/models/{modelName}:generateContent or :streamGenerateContent
         const modelPathMatch = cleanPath.match(
-            /^(\/v1beta\/models\/)([^:]+)(:(generateContent|streamGenerateContent).*)$/
+            /^(\/(?:v1beta\/)?models\/)([^:]+)(:(generateContent|streamGenerateContent).*)$/
         );
         let modelThinkingLevel = null;
         let modelStreamingMode = null;
@@ -4327,6 +4525,11 @@ class RequestHandler {
             `[Proxy] Debug: Final Gemini Request (Google Native) = ${JSON.stringify(requestBodyObj, null, 2)}`
         );
 
+        const queryParams = { ...(req.query || {}) };
+        if (!cleanPath.includes(":streamGenerateContent")) {
+            delete queryParams.alt;
+        }
+
         return {
             body: req.method !== "GET" ? JSON.stringify(requestBodyObj) : undefined,
             headers: req.headers,
@@ -4335,7 +4538,7 @@ class RequestHandler {
                 (req.path.includes("generateContent") || req.path.includes("streamGenerateContent")),
             method: req.method,
             path: cleanPath,
-            query_params: req.query || {},
+            query_params: queryParams,
             request_id: requestId,
             response_transform: responseTransform,
             streaming_mode: modelStreamingMode || this.config.streamingMode,
