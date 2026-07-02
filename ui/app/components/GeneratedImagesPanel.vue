@@ -29,14 +29,47 @@
                 </template>
             </el-table-column>
             <el-table-column label="文件名" min-width="260" prop="filename" />
+            <el-table-column label="来源" min-width="180">
+                <template #default="{ row }">
+                    <div class="meta-stack">
+                        <span>{{ row.source || "-" }}</span>
+                        <small>{{ row.requestId || "无 requestId" }}</small>
+                    </div>
+                </template>
+            </el-table-column>
+            <el-table-column label="模型" min-width="220">
+                <template #default="{ row }">
+                    <div class="meta-stack">
+                        <span>{{ row.model || "-" }}</span>
+                        <small v-if="row.metadata?.model?.requested"> from {{ row.metadata.model.requested }} </small>
+                    </div>
+                </template>
+            </el-table-column>
+            <el-table-column label="尺寸" width="150">
+                <template #default="{ row }">
+                    <div class="meta-stack">
+                        <span>{{ row.openaiSize || "-" }}</span>
+                        <small>{{ row.aspectRatio || "-" }}</small>
+                    </div>
+                </template>
+            </el-table-column>
+            <el-table-column label="Prompt" min-width="220">
+                <template #default="{ row }">
+                    <el-tooltip v-if="row.promptPreview" :content="row.promptPreview" placement="top">
+                        <span class="prompt-preview">{{ row.promptPreview }}</span>
+                    </el-tooltip>
+                    <span v-else>-</span>
+                </template>
+            </el-table-column>
             <el-table-column label="大小" width="110">
                 <template #default="{ row }">{{ formatSize(row.size) }}</template>
             </el-table-column>
             <el-table-column label="更新时间" width="190">
                 <template #default="{ row }">{{ formatDate(row.modifiedAt) }}</template>
             </el-table-column>
-            <el-table-column fixed="right" label="操作" width="190">
+            <el-table-column fixed="right" label="操作" width="250">
                 <template #default="{ row }">
+                    <el-button link type="primary" @click="showDetails(row)">查看信息</el-button>
                     <el-button link type="primary" @click="copyUrl(row)">复制 URL</el-button>
                     <el-button link type="danger" @click="deleteImages([row])">删除</el-button>
                 </template>
@@ -52,6 +85,24 @@
                 <el-button @click="previewVisible = false">关闭</el-button>
             </template>
         </el-dialog>
+
+        <el-dialog v-model="detailsVisible" class="image-details-dialog" title="图片排查信息" width="760px">
+            <el-descriptions v-if="detailsImage" :column="2" border>
+                <el-descriptions-item label="文件名">{{ detailsImage.filename }}</el-descriptions-item>
+                <el-descriptions-item label="请求ID">{{ detailsImage.requestId || "-" }}</el-descriptions-item>
+                <el-descriptions-item label="来源">{{ detailsImage.source || "-" }}</el-descriptions-item>
+                <el-descriptions-item label="模型">{{ detailsImage.model || "-" }}</el-descriptions-item>
+                <el-descriptions-item label="OpenAI Size">{{ detailsImage.openaiSize || "-" }}</el-descriptions-item>
+                <el-descriptions-item label="比例">{{ detailsImage.aspectRatio || "-" }}</el-descriptions-item>
+                <el-descriptions-item label="文件大小">{{ formatSize(detailsImage.size) }}</el-descriptions-item>
+                <el-descriptions-item label="更新时间">{{ formatDate(detailsImage.modifiedAt) }}</el-descriptions-item>
+            </el-descriptions>
+            <pre class="metadata-json">{{ formatMetadata(detailsImage?.metadata) }}</pre>
+            <template #footer>
+                <el-button v-if="detailsImage" @click="copyMetadata(detailsImage)">复制排查信息</el-button>
+                <el-button @click="detailsVisible = false">关闭</el-button>
+            </template>
+        </el-dialog>
     </section>
 </template>
 
@@ -62,6 +113,8 @@ import { ElMessage, ElMessageBox } from "element-plus";
 const images = ref([]);
 const selectedImages = ref([]);
 const loading = ref(false);
+const detailsImage = ref(null);
+const detailsVisible = ref(false);
 const preview = ref(null);
 const previewVisible = ref(false);
 
@@ -106,10 +159,25 @@ const previewImage = image => {
     previewVisible.value = true;
 };
 
+const showDetails = image => {
+    detailsImage.value = image;
+    detailsVisible.value = true;
+};
+
 const copyUrl = async image => {
     const absoluteUrl = new URL(image.url, window.location.origin).toString();
     await navigator.clipboard.writeText(absoluteUrl);
     ElMessage.success("URL 已复制");
+};
+
+const formatMetadata = metadata => {
+    if (!metadata) return "暂无元数据，可能是旧图片或手动放入的文件。";
+    return JSON.stringify(metadata, null, 2);
+};
+
+const copyMetadata = async image => {
+    await navigator.clipboard.writeText(formatMetadata(image.metadata));
+    ElMessage.success("排查信息已复制");
 };
 
 const deleteImages = async rows => {
@@ -188,12 +256,48 @@ onMounted(loadImages);
     width: 100%;
 }
 
+.meta-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+
+    small {
+        color: #909399;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+}
+
+.prompt-preview {
+    display: inline-block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+    white-space: nowrap;
+}
+
 .preview-image {
     display: block;
     max-width: 100%;
     max-height: 70vh;
     margin: 0 auto;
     border-radius: 8px;
+}
+
+.metadata-json {
+    max-height: 420px;
+    margin: 16px 0 0;
+    padding: 12px;
+    overflow: auto;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    background: #101828;
+    color: #e5e7eb;
+    font-size: 12px;
+    line-height: 1.6;
 }
 
 @media (max-width: 768px) {

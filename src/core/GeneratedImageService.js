@@ -23,13 +23,21 @@ class GeneratedImageService {
             .filter(entry => entry.isFile() && ALLOWED_IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()))
             .map(entry => {
                 const filePath = path.join(this.imageDir, entry.name);
+                const metadata = this.readMetadata(entry.name);
                 const stat = fs.statSync(filePath);
 
                 return {
+                    aspectRatio: metadata?.size?.aspectRatio || null,
                     createdAt: stat.birthtime.toISOString(),
                     filename: entry.name,
+                    metadata,
+                    model: metadata?.model?.target || metadata?.model?.requested || null,
                     modifiedAt: stat.mtime.toISOString(),
+                    openaiSize: metadata?.size?.openaiSize || null,
+                    promptPreview: metadata?.request?.promptPreview || null,
+                    requestId: metadata?.requestId || null,
                     size: stat.size,
+                    source: metadata?.source || null,
                     url: `/generated-images/${encodeURIComponent(entry.name)}`,
                 };
             })
@@ -56,6 +64,10 @@ class GeneratedImageService {
                     return;
                 }
                 fs.unlinkSync(filePath);
+                const metadataPath = this._getMetadataPath(safeName);
+                if (fs.existsSync(metadataPath)) {
+                    fs.unlinkSync(metadataPath);
+                }
                 result.deleted.push(safeName);
             } catch (error) {
                 result.failed.push({ error: error.message, filename });
@@ -65,8 +77,32 @@ class GeneratedImageService {
         return result;
     }
 
+    readMetadata(filename) {
+        try {
+            const metadataPath = this._getMetadataPath(filename);
+            if (!fs.existsSync(metadataPath)) return null;
+            return JSON.parse(fs.readFileSync(metadataPath, "utf8"));
+        } catch (error) {
+            this.logger?.warn(`[GeneratedImageService] Failed to read image metadata: ${error.message}`);
+            return null;
+        }
+    }
+
+    writeMetadata(filename, metadata) {
+        this._ensureDir();
+        const safeName = this._sanitizeFilename(filename);
+        const metadataPath = this._getMetadataPath(safeName);
+        fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 4)}\n`);
+        return metadataPath;
+    }
+
     _ensureDir() {
         fs.mkdirSync(this.imageDir, { recursive: true });
+    }
+
+    _getMetadataPath(filename) {
+        const safeName = this._sanitizeFilename(filename);
+        return path.join(this.imageDir, `${safeName}.json`);
     }
 
     _sanitizeFilename(filename) {

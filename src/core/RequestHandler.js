@@ -257,6 +257,36 @@ class RequestHandler {
         return `${normalized.slice(0, maxLength)}...`;
     }
 
+    _sanitizeDebugValue(value, depth = 0) {
+        if (depth > 4) return "[MaxDepth]";
+        if (Buffer.isBuffer(value)) return `[Buffer ${value.length} bytes]`;
+        if (Array.isArray(value)) return value.map(item => this._sanitizeDebugValue(item, depth + 1));
+        if (!value || typeof value !== "object") {
+            const text = typeof value === "string" ? value : null;
+            if (text && text.length > 2000) return `${text.slice(0, 2000)}...[truncated ${text.length} chars]`;
+            return value;
+        }
+
+        const result = {};
+        Object.entries(value).forEach(([key, item]) => {
+            result[key] = this._sanitizeDebugValue(item, depth + 1);
+        });
+        return result;
+    }
+
+    _sanitizeOpenAIImagesDebugParams(body) {
+        const params = {};
+        const sensitiveImageKeys = new Set(["image", "image_url", "images", "mask", "mask_url"]);
+        Object.entries(body || {}).forEach(([key, value]) => {
+            if (sensitiveImageKeys.has(key)) {
+                params[key] = "[image data omitted]";
+                return;
+            }
+            params[key] = this._sanitizeDebugValue(value);
+        });
+        return params;
+    }
+
     _buildGeminiRequestFromOpenAIImages(openAIImagesBody) {
         const body = openAIImagesBody || {};
         const rawPrompt = body.prompt;
@@ -303,6 +333,7 @@ class RequestHandler {
             operation: mappedTarget.operation || "generateContent",
             prompt,
             requestedCount: n,
+            requestParams: this._sanitizeOpenAIImagesDebugParams(body),
             responseFormat,
             size: body.size || "1024x1024",
         };
@@ -494,6 +525,7 @@ class RequestHandler {
             imageCount: inlineImages.length,
             inputMode: multipart ? "multipart" : "json",
             prompt,
+            requestParams: this._sanitizeOpenAIImagesDebugParams(body),
         };
     }
 
@@ -1377,6 +1409,42 @@ class RequestHandler {
                 return this._sendErrorResponse(res, 400, "image is required", "invalid_request_error");
             }
 
+            req.__generatedImageMetadata = {
+                account: {
+                    currentAuthIndex: this.currentAuthIndex,
+                },
+                action: actionLabel,
+                api: "openai-images",
+                model: {
+                    isMapped: converted.isModelMapped,
+                    requested: converted.modelMappingSource,
+                    target: converted.modelMappingTarget || `${converted.model}:${converted.operation}`,
+                },
+                request: {
+                    contentType: String(req.headers["content-type"] || ""),
+                    inputImageCount: converted.imageCount || 0,
+                    inputMode: converted.inputMode || "json",
+                    n: converted.requestedCount,
+                    params: converted.requestParams || {},
+                    path: req.path,
+                    promptLength: converted.prompt.length,
+                    promptPreview: this._formatPromptPreview(converted.prompt),
+                    responseFormat: converted.responseFormat,
+                },
+                requestId,
+                size: {
+                    aspectRatio: converted.aspectRatio,
+                    imageSize: converted.imageSize || null,
+                    isMapped: converted.isSizeMapped,
+                    openaiSize: converted.openaiSize,
+                    requested: converted.size,
+                },
+                source: `OpenAI Images ${actionLabel}`,
+                timestamps: {
+                    receivedAt: new Date(startedAt).toISOString(),
+                },
+            };
+
             const usageCount = this.authSwitcher.incrementUsageCount();
             if (usageCount > 0) {
                 const rotationCountText =
@@ -1503,6 +1571,18 @@ class RequestHandler {
                 );
                 const b64Count = openAIImagesResponse.data.filter(item => item.b64_json).length;
                 const urlCount = openAIImagesResponse.data.filter(item => item.url).length;
+                this._updateStoredGeneratedImageMetadata(req, {
+                    response: {
+                        b64Count,
+                        dataCount: openAIImagesResponse.data.length,
+                        responseFormat: converted.responseFormat,
+                        urlCount,
+                    },
+                    timestamps: {
+                        completedAt: new Date().toISOString(),
+                        elapsedMs: Date.now() - startedAt,
+                    },
+                });
 
                 this.logger.info(
                     `${flowPrefix} 8/8 已转换为 OpenAI Images 响应：data=${openAIImagesResponse.data.length}, url=${urlCount}, b64_json=${b64Count}, elapsed=${Date.now() - startedAt}ms`
@@ -3889,6 +3969,39 @@ class RequestHandler {
         }
     }
 
+    _mergeImageMetadata(base, patch) {
+        const merged = { ...(base || {}) };
+        Object.entries(patch || {}).forEach(([key, value]) => {
+            if (
+                value &&
+                typeof value === "object" &&
+                !Array.isArray(value) &&
+                !Buffer.isBuffer(value) &&
+                merged[key] &&
+                typeof merged[key] === "object" &&
+                !Array.isArray(merged[key])
+            ) {
+                merged[key] = this._mergeImageMetadata(merged[key], value);
+                return;
+            }
+            merged[key] = value;
+        });
+        return merged;
+    }
+
+    _updateStoredGeneratedImageMetadata(req, patch) {
+        const filenames = req?.__storedGeneratedImages || [];
+        filenames.forEach(filename => {
+            try {
+                const existing = this.serverSystem.generatedImageService?.readMetadata(filename) || {};
+                const metadata = this._mergeImageMetadata(existing, patch);
+                this.serverSystem.generatedImageService?.writeMetadata(filename, metadata);
+            } catch (error) {
+                this.logger.warn(`[OpenAI图片流程] 更新图片元数据失败：filename=${filename}, error=${error.message}`);
+            }
+        });
+    }
+
     _storeInlineImage(inlineData, req) {
         if (!inlineData?.data || typeof inlineData.data !== "string") {
             return false;
@@ -3907,6 +4020,26 @@ class RequestHandler {
         inlineData.fileUri = this._buildGeneratedImageUrl(filename, req);
         inlineData.dataRemoved = true;
         delete inlineData.data;
+
+        const imageIndex = req ? req.__generatedImageIndex || 0 : 0;
+        if (req) {
+            req.__generatedImageIndex = imageIndex + 1;
+            req.__storedGeneratedImages = [...(req.__storedGeneratedImages || []), filename];
+        }
+        const metadata = this._mergeImageMetadata(req?.__generatedImageMetadata || {}, {
+            file: {
+                filename,
+                mimeType: inlineData.mimeType || "unknown",
+                size: imageBuffer.length,
+                url: inlineData.fileUri,
+            },
+            imageIndex,
+        });
+        try {
+            this.serverSystem.generatedImageService?.writeMetadata(filename, metadata);
+        } catch (error) {
+            this.logger.warn(`[OpenAI图片流程] 写入图片元数据失败：filename=${filename}, error=${error.message}`);
+        }
 
         const requestIdText = req?.__openAIImagesRequestId ? `，请求ID：${req.__openAIImagesRequestId}` : "";
         this.logger.info(
