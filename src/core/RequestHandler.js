@@ -124,6 +124,8 @@ class RequestHandler {
                 changed: false,
                 model,
                 operation,
+                sourceModelOperation: model && operation ? `${model}:${operation}` : null,
+                targetModelOperation: model && operation ? `${model}:${operation}` : null,
             };
         }
 
@@ -131,10 +133,13 @@ class RequestHandler {
         const sourceModelOperation = explicitSource.operation ? model : `${model}:${operation}`;
         const resolved = this.serverSystem.modelMappingService.resolveModelOperation(sourceModelOperation);
         if (!resolved.changed) {
+            const targetModelOperation = `${explicitSource.model}:${explicitSource.operation || operation}`;
             return {
                 changed: false,
                 model: explicitSource.model,
                 operation: explicitSource.operation || operation,
+                sourceModelOperation,
+                targetModelOperation,
             };
         }
 
@@ -150,6 +155,8 @@ class RequestHandler {
             changed: true,
             model: mappedModel,
             operation: mappedOperation,
+            sourceModelOperation,
+            targetModelOperation: `${mappedModel}:${mappedOperation}`,
         };
     }
 
@@ -242,6 +249,14 @@ class RequestHandler {
         return this._isImageUrlResponseMode() ? "url" : "b64_json";
     }
 
+    _formatPromptPreview(prompt, maxLength = 80) {
+        const normalized = String(prompt || "")
+            .replace(/\s+/g, " ")
+            .trim();
+        if (normalized.length <= maxLength) return normalized;
+        return `${normalized.slice(0, maxLength)}...`;
+    }
+
     _buildGeminiRequestFromOpenAIImages(openAIImagesBody) {
         const body = openAIImagesBody || {};
         const rawPrompt = body.prompt;
@@ -279,8 +294,11 @@ class RequestHandler {
             aspectRatio: sizeConfig.imageConfig.aspectRatio,
             googleRequest,
             imageSize: sizeConfig.imageConfig.imageSize || null,
+            isModelMapped: mappedTarget.changed,
             isSizeMapped: sizeConfig.mapped,
             model: mappedTarget.model,
+            modelMappingSource: mappedTarget.sourceModelOperation,
+            modelMappingTarget: mappedTarget.targetModelOperation,
             openaiSize: sizeConfig.openaiSize,
             operation: mappedTarget.operation || "generateContent",
             prompt,
@@ -474,6 +492,7 @@ class RequestHandler {
                 ? multipart.files.some(file => file.fieldName === "mask")
                 : Boolean(body.mask || body.mask_url),
             imageCount: inlineImages.length,
+            inputMode: multipart ? "multipart" : "json",
             prompt,
         };
     }
@@ -1313,6 +1332,8 @@ class RequestHandler {
 
     async _processOpenAIImagesWithBuilder(req, res, actionLabel, buildConvertedRequest) {
         const requestId = this._generateRequestId();
+        const startedAt = Date.now();
+        const flowPrefix = `[OpenAI图片流程][${requestId}]`;
         this._startTrackedRequest(requestId, req, {
             apiFormat: "openai",
             isStreaming: false,
@@ -1321,29 +1342,38 @@ class RequestHandler {
         });
         this._setResponseApiFormat(res, "openai");
         res.__proxyResponseStreamMode = null;
+        req.__openAIImagesRequestId = requestId;
 
         try {
-            this.logger.info(`[OpenAI图片] 收到 OpenAI Images ${actionLabel}请求，请求ID：${requestId}`);
+            const contentType = String(req.headers["content-type"] || "未提供");
+            this.logger.info(
+                `${flowPrefix} 1/8 收到 OpenAI Images ${actionLabel}请求：method=${req.method}, path=${req.path}, contentType=${contentType}`
+            );
 
             if (!(await this._ensureBrowserBackedRequestReady(res, { waitErrorType: "service_unavailable" }))) {
                 return;
             }
+            this.logger.info(`${flowPrefix} 2/8 浏览器连接已就绪：currentAuthIndex=${this.currentAuthIndex}`);
 
             let converted;
             try {
                 converted = await buildConvertedRequest();
             } catch (error) {
-                this.logger.error(`[OpenAI图片] 请求参数转换失败：${error.message}，请求ID：${requestId}`);
+                this.logger.error(`${flowPrefix} 请求参数转换失败：${error.message}`);
                 return this._sendErrorResponse(res, 400, "Invalid OpenAI images request.", "invalid_request_error");
             }
 
+            this.logger.info(
+                `${flowPrefix} 3/8 OpenAI参数解析完成：promptLength=${converted.prompt.length}, promptPreview="${this._formatPromptPreview(converted.prompt)}", size=${converted.size}, responseFormat=${converted.responseFormat}, n=${converted.requestedCount}`
+            );
+
             if (!converted.prompt) {
-                this.logger.warn(`[OpenAI图片] 请求缺少 prompt，请求ID：${requestId}`);
+                this.logger.warn(`${flowPrefix} 请求缺少 prompt`);
                 return this._sendErrorResponse(res, 400, "prompt is required", "invalid_request_error");
             }
 
             if (actionLabel === "编辑" && converted.imageCount === 0) {
-                this.logger.warn(`[OpenAI图片] 编辑请求缺少 image，请求ID：${requestId}`);
+                this.logger.warn(`${flowPrefix} 编辑请求缺少 image`);
                 return this._sendErrorResponse(res, 400, "image is required", "invalid_request_error");
             }
 
@@ -1352,30 +1382,36 @@ class RequestHandler {
                 const rotationCountText =
                     this.config.switchOnUses > 0 ? `${usageCount}/${this.config.switchOnUses}` : `${usageCount}`;
                 this.logger.info(
-                    `[OpenAI图片] 账号调用计数：${rotationCountText}，当前账号：${this.currentAuthIndex}，请求ID：${requestId}`
+                    `${flowPrefix} 账号调用计数：${rotationCountText}，当前账号：${this.currentAuthIndex}`
                 );
                 if (this.authSwitcher.shouldSwitchByUsage()) {
                     this.needsSwitchingAfterRequest = true;
                 }
             }
 
+            this.logger.info(
+                `${flowPrefix} 4/8 模型映射：${converted.modelMappingSource || "未知"} -> ${converted.modelMappingTarget || `${converted.model}:${converted.operation}`}，mapped=${converted.isModelMapped ? "是" : "否"}`
+            );
+
             if (converted.operation !== "generateContent") {
                 this.logger.info(
-                    `[OpenAI图片] 图片接口强制使用 generateContent，原目标：${converted.model}:${converted.operation}，请求ID：${requestId}`
+                    `${flowPrefix} 图片接口强制使用 generateContent，原目标：${converted.model}:${converted.operation}`
                 );
                 converted.operation = "generateContent";
             }
 
             if (converted.imageCount !== undefined) {
                 this.logger.info(
-                    `[OpenAI图片] 编辑请求包含参考图 ${converted.imageCount} 张，mask=${converted.hasMask ? "有" : "无"}，请求ID：${requestId}`
+                    `${flowPrefix} 编辑输入：mode=${converted.inputMode}, 参考图=${converted.imageCount}张，mask=${converted.hasMask ? "有" : "无"}`
                 );
                 if (converted.hasMask) {
-                    this.logger.warn(
-                        `[OpenAI图片] 当前 Gemini 图片编辑链路暂不使用 mask，仅使用参考图和 prompt，请求ID：${requestId}`
-                    );
+                    this.logger.warn(`${flowPrefix} 当前 Gemini 图片编辑链路暂不使用 mask，仅使用参考图和 prompt`);
                 }
             }
+
+            this.logger.info(
+                `${flowPrefix} 5/8 尺寸映射：openaiSize=${converted.openaiSize}, aspectRatio=${converted.aspectRatio}, imageSize=${converted.imageSize || "默认"}, mapped=${converted.isSizeMapped ? "是" : "否"}`
+            );
 
             const proxyRequest = {
                 body: JSON.stringify(converted.googleRequest),
@@ -1396,8 +1432,13 @@ class RequestHandler {
                 streamMode: null,
             });
 
+            const contentParts = converted.googleRequest.contents?.[0]?.parts || [];
+            const inlineImageCount = contentParts.filter(part => part.inlineData).length;
             this.logger.info(
-                `[OpenAI图片] 已转换为 Gemini 请求：model=${converted.model}, openaiSize=${converted.openaiSize}, aspectRatio=${converted.aspectRatio}, imageSize=${converted.imageSize || "默认"}, sizeMapped=${converted.isSizeMapped ? "是" : "否"}, responseFormat=${converted.responseFormat}, n=${converted.requestedCount}，请求ID：${requestId}`
+                `${flowPrefix} 6/8 Gemini请求构建完成：path=${proxyRequest.path}, parts=${contentParts.length}, inlineImages=${inlineImageCount}, generationConfig=${JSON.stringify(converted.googleRequest.generationConfig)}`
+            );
+            this.logger.info(
+                `${flowPrefix} 7/8 开始转发到 AI Studio 浏览器连接：account=${this.currentAuthIndex}, requestAttempt=${proxyRequest.request_attempt_id}`
             );
 
             try {
@@ -1410,12 +1451,16 @@ class RequestHandler {
 
                 const result = await this._executeRequestWithRetries(proxyRequest, messageQueue);
                 if (!result.success) {
+                    this.logger.error(
+                        `${flowPrefix} Gemini请求失败：status=${result.error.status || 500}, message=${result.error.message}`
+                    );
                     this._logFinalRequestFailure(result.error, "OpenAI Images", requestId);
                     if (!result.error.skipAccountSwitch && !this._isConnectionResetError(result.error)) {
                         await this.authSwitcher.handleRequestFailureAndSwitch(result.error, null);
                     }
                     return this._sendErrorResponse(res, result.error.status || 500, result.error.message);
                 }
+                this.logger.info(`${flowPrefix} Gemini响应通道已建立，开始收集响应内容`);
 
                 if (this.authSwitcher.failureCount > 0) {
                     this.logger.debug(
@@ -1425,6 +1470,8 @@ class RequestHandler {
                 }
 
                 const chunks = [];
+                let byteCount = 0;
+                let chunkCount = 0;
                 let receiving = true;
                 while (receiving) {
                     const message = await result.queue.dequeue(this.timeouts.FAKE_STREAM);
@@ -1434,40 +1481,46 @@ class RequestHandler {
                     }
 
                     if (message.event_type === "error") {
-                        this.logger.error(`[OpenAI图片] Gemini 返回错误：${message.message}，请求ID：${requestId}`);
+                        this.logger.error(`${flowPrefix} Gemini 返回错误：${message.message}`);
                         this._markTrackedResponseError(res, message.message, 500);
                         return this._sendErrorResponse(res, 500, message.message);
                     }
 
                     if (message.event_type === "chunk" && message.data) {
-                        chunks.push(Buffer.from(message.data));
+                        const chunk = Buffer.from(message.data);
+                        byteCount += chunk.length;
+                        chunkCount++;
+                        chunks.push(chunk);
                     }
                 }
 
                 const responseBodyBuffer = Buffer.concat(chunks);
+                this.logger.info(`${flowPrefix} Gemini响应收集完成：chunks=${chunkCount}, bytes=${byteCount}`);
                 const openAIImagesResponse = this._convertGeminiNativeToOpenAIImages(
                     responseBodyBuffer,
                     req,
                     converted.responseFormat
                 );
+                const b64Count = openAIImagesResponse.data.filter(item => item.b64_json).length;
+                const urlCount = openAIImagesResponse.data.filter(item => item.url).length;
 
                 this.logger.info(
-                    `[OpenAI图片] Gemini 响应已转换为 OpenAI Images 格式，图片数量：${openAIImagesResponse.data.length}，请求ID：${requestId}`
+                    `${flowPrefix} 8/8 已转换为 OpenAI Images 响应：data=${openAIImagesResponse.data.length}, url=${urlCount}, b64_json=${b64Count}, elapsed=${Date.now() - startedAt}ms`
                 );
 
                 res.type("application/json").send(JSON.stringify(openAIImagesResponse));
             } catch (error) {
                 this._handleQueueTimeout(error, requestId);
-                this.logger.error(`[OpenAI图片] 请求处理失败：${error.message}，请求ID：${requestId}`);
+                this.logger.error(`${flowPrefix} 请求处理失败：${error.message}`);
                 this._handleRequestError(error, res, requestId);
             } finally {
                 this.connectionRegistry.removeMessageQueue(requestId, "request_complete");
                 if (this.needsSwitchingAfterRequest) {
                     this.logger.info(
-                        `[OpenAI图片] 调用计数达到切换阈值（${this.authSwitcher.usageCount}/${this.config.switchOnUses}），将在后台切换账号...`
+                        `${flowPrefix} 调用计数达到切换阈值（${this.authSwitcher.usageCount}/${this.config.switchOnUses}），将在后台切换账号...`
                     );
                     this.authSwitcher.switchToNextAuth().catch(err => {
-                        this.logger.error(`[OpenAI图片] 后台账号切换失败：${err.message}`);
+                        this.logger.error(`${flowPrefix} 后台账号切换失败：${err.message}`);
                     });
                     this.needsSwitchingAfterRequest = false;
                 }
@@ -3854,6 +3907,11 @@ class RequestHandler {
         inlineData.fileUri = this._buildGeneratedImageUrl(filename, req);
         inlineData.dataRemoved = true;
         delete inlineData.data;
+
+        const requestIdText = req?.__openAIImagesRequestId ? `，请求ID：${req.__openAIImagesRequestId}` : "";
+        this.logger.info(
+            `[OpenAI图片流程] 图片已落盘：filename=${filename}, mime=${inlineData.mimeType || "unknown"}, bytes=${imageBuffer.length}, url=${inlineData.fileUri}${requestIdText}`
+        );
 
         return true;
     }
