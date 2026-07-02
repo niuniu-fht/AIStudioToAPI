@@ -261,6 +261,194 @@ class RequestHandler {
         };
     }
 
+    _getMultipartBoundary(contentType) {
+        const match = String(contentType || "").match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+        return match ? match[1] || match[2] : null;
+    }
+
+    _parseMultipartContentDisposition(value) {
+        const result = {};
+        String(value || "")
+            .split(";")
+            .map(item => item.trim())
+            .forEach(item => {
+                const match = item.match(/^([^=]+)="?([^"]*)"?$/);
+                if (match) {
+                    result[match[1].toLowerCase()] = match[2];
+                }
+            });
+        return result;
+    }
+
+    _parseMultipartFormData(req) {
+        const boundary = this._getMultipartBoundary(req.headers["content-type"]);
+        if (!boundary || !req.rawBody?.length) {
+            return { fields: {}, files: [] };
+        }
+
+        const delimiter = Buffer.from(`--${boundary}`);
+        const rawBody = req.rawBody;
+        const fields = {};
+        const files = [];
+        let offset = 0;
+
+        while (offset < rawBody.length) {
+            const boundaryStart = rawBody.indexOf(delimiter, offset);
+            if (boundaryStart < 0) break;
+
+            const partStart = boundaryStart + delimiter.length;
+            if (rawBody.slice(partStart, partStart + 2).toString() === "--") break;
+
+            const contentStart =
+                rawBody.slice(partStart, partStart + 2).toString() === "\r\n" ? partStart + 2 : partStart;
+            const headerEnd = rawBody.indexOf(Buffer.from("\r\n\r\n"), contentStart);
+            if (headerEnd < 0) break;
+
+            const nextBoundary = rawBody.indexOf(delimiter, headerEnd + 4);
+            if (nextBoundary < 0) break;
+
+            const headerText = rawBody.slice(contentStart, headerEnd).toString("utf8");
+            let content = rawBody.slice(headerEnd + 4, nextBoundary);
+            if (content.slice(-2).toString() === "\r\n") {
+                content = content.slice(0, -2);
+            }
+
+            const headers = {};
+            headerText.split("\r\n").forEach(line => {
+                const index = line.indexOf(":");
+                if (index > -1) {
+                    headers[line.slice(0, index).trim().toLowerCase()] = line.slice(index + 1).trim();
+                }
+            });
+
+            const disposition = this._parseMultipartContentDisposition(headers["content-disposition"]);
+            if (disposition.name) {
+                if (disposition.filename !== undefined) {
+                    files.push({
+                        buffer: content,
+                        fieldName: disposition.name,
+                        filename: disposition.filename,
+                        mimeType: headers["content-type"] || "application/octet-stream",
+                    });
+                } else {
+                    fields[disposition.name] = content.toString("utf8");
+                }
+            }
+
+            offset = nextBoundary;
+        }
+
+        return { fields, files };
+    }
+
+    async _downloadImageToInlineData(imageUrl) {
+        const response = await fetch(imageUrl);
+        if (!response.ok) {
+            throw new Error(`下载图片失败，HTTP ${response.status}`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        return {
+            data: Buffer.from(arrayBuffer).toString("base64"),
+            mimeType: response.headers.get("content-type") || "image/jpeg",
+        };
+    }
+
+    async _normalizeOpenAIEditImageInput(input, fallbackMimeType = "image/png") {
+        if (!input) return null;
+
+        if (Buffer.isBuffer(input)) {
+            return {
+                data: input.toString("base64"),
+                mimeType: fallbackMimeType,
+            };
+        }
+
+        if (input.buffer && Buffer.isBuffer(input.buffer)) {
+            return {
+                data: input.buffer.toString("base64"),
+                mimeType: input.mimeType || fallbackMimeType,
+            };
+        }
+
+        if (typeof input === "object") {
+            if (input.data && input.mimeType) {
+                return {
+                    data: String(input.data).replace(/^data:[^,]+,/, ""),
+                    mimeType: input.mimeType,
+                };
+            }
+            if (input.b64_json) {
+                return {
+                    data: String(input.b64_json),
+                    mimeType: input.mimeType || fallbackMimeType,
+                };
+            }
+            if (input.url) {
+                return this._normalizeOpenAIEditImageInput(input.url, fallbackMimeType);
+            }
+        }
+
+        const value = String(input).trim();
+        const dataUrlMatch = value.match(/^data:(image\/[^;]+);base64,(.+)$/);
+        if (dataUrlMatch) {
+            return {
+                data: dataUrlMatch[2],
+                mimeType: dataUrlMatch[1],
+            };
+        }
+
+        if (/^https?:\/\//i.test(value)) {
+            return await this._downloadImageToInlineData(value);
+        }
+
+        return {
+            data: value,
+            mimeType: fallbackMimeType,
+        };
+    }
+
+    async _buildGeminiRequestFromOpenAIImageEdits(req) {
+        const contentType = String(req.headers["content-type"] || "");
+        const multipart = contentType.includes("multipart/form-data") ? this._parseMultipartFormData(req) : null;
+        const body = multipart ? multipart.fields : req.body || {};
+        const rawPrompt = body.prompt;
+        const prompt = Array.isArray(rawPrompt) ? rawPrompt.join("\n") : String(rawPrompt || "").trim();
+        const rawImages = [];
+
+        if (multipart) {
+            multipart.files
+                .filter(file => file.fieldName === "image" || file.fieldName === "image[]")
+                .forEach(file => rawImages.push(file));
+        } else {
+            const imageInput = body.image || body.images || body.image_url;
+            if (Array.isArray(imageInput)) {
+                rawImages.push(...imageInput);
+            } else if (imageInput) {
+                rawImages.push(imageInput);
+            }
+        }
+
+        const inlineImages = [];
+        for (const imageInput of rawImages) {
+            const inlineData = await this._normalizeOpenAIEditImageInput(imageInput);
+            if (inlineData) {
+                inlineImages.push(inlineData);
+            }
+        }
+
+        const base = this._buildGeminiRequestFromOpenAIImages(body);
+        base.googleRequest.contents[0].parts = [{ text: prompt }, ...inlineImages.map(inlineData => ({ inlineData }))];
+
+        return {
+            ...base,
+            hasMask: multipart
+                ? multipart.files.some(file => file.fieldName === "mask")
+                : Boolean(body.mask || body.mask_url),
+            imageCount: inlineImages.length,
+            prompt,
+        };
+    }
+
     _collectGeminiInlineImages(value, images = []) {
         if (Array.isArray(value)) {
             value.forEach(item => this._collectGeminiInlineImages(item, images));
@@ -1083,6 +1271,18 @@ class RequestHandler {
     }
 
     async processOpenAIImagesRequest(req, res) {
+        return this._processOpenAIImagesWithBuilder(req, res, "生成", () =>
+            this._buildGeminiRequestFromOpenAIImages(req.body)
+        );
+    }
+
+    async processOpenAIImageEditsRequest(req, res) {
+        return this._processOpenAIImagesWithBuilder(req, res, "编辑", () =>
+            this._buildGeminiRequestFromOpenAIImageEdits(req)
+        );
+    }
+
+    async _processOpenAIImagesWithBuilder(req, res, actionLabel, buildConvertedRequest) {
         const requestId = this._generateRequestId();
         this._startTrackedRequest(requestId, req, {
             apiFormat: "openai",
@@ -1094,7 +1294,7 @@ class RequestHandler {
         res.__proxyResponseStreamMode = null;
 
         try {
-            this.logger.info(`[OpenAI图片] 收到 OpenAI Images 生成请求，请求ID：${requestId}`);
+            this.logger.info(`[OpenAI图片] 收到 OpenAI Images ${actionLabel}请求，请求ID：${requestId}`);
 
             if (!(await this._ensureBrowserBackedRequestReady(res, { waitErrorType: "service_unavailable" }))) {
                 return;
@@ -1102,7 +1302,7 @@ class RequestHandler {
 
             let converted;
             try {
-                converted = this._buildGeminiRequestFromOpenAIImages(req.body);
+                converted = await buildConvertedRequest();
             } catch (error) {
                 this.logger.error(`[OpenAI图片] 请求参数转换失败：${error.message}，请求ID：${requestId}`);
                 return this._sendErrorResponse(res, 400, "Invalid OpenAI images request.", "invalid_request_error");
@@ -1111,6 +1311,11 @@ class RequestHandler {
             if (!converted.prompt) {
                 this.logger.warn(`[OpenAI图片] 请求缺少 prompt，请求ID：${requestId}`);
                 return this._sendErrorResponse(res, 400, "prompt is required", "invalid_request_error");
+            }
+
+            if (actionLabel === "编辑" && converted.imageCount === 0) {
+                this.logger.warn(`[OpenAI图片] 编辑请求缺少 image，请求ID：${requestId}`);
+                return this._sendErrorResponse(res, 400, "image is required", "invalid_request_error");
             }
 
             const usageCount = this.authSwitcher.incrementUsageCount();
@@ -1130,6 +1335,17 @@ class RequestHandler {
                     `[OpenAI图片] 图片接口强制使用 generateContent，原目标：${converted.model}:${converted.operation}，请求ID：${requestId}`
                 );
                 converted.operation = "generateContent";
+            }
+
+            if (converted.imageCount !== undefined) {
+                this.logger.info(
+                    `[OpenAI图片] 编辑请求包含参考图 ${converted.imageCount} 张，mask=${converted.hasMask ? "有" : "无"}，请求ID：${requestId}`
+                );
+                if (converted.hasMask) {
+                    this.logger.warn(
+                        `[OpenAI图片] 当前 Gemini 图片编辑链路暂不使用 mask，仅使用参考图和 prompt，请求ID：${requestId}`
+                    );
+                }
             }
 
             const proxyRequest = {
