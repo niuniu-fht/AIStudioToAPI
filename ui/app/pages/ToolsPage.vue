@@ -13,6 +13,9 @@
             <el-tab-pane label="模型映射" name="mappings">
                 <ModelMappingsPanel />
             </el-tab-pane>
+            <el-tab-pane label="尺寸映射" name="sizes">
+                <SizeMappingsPanel />
+            </el-tab-pane>
             <el-tab-pane label="图片管理" name="images">
                 <GeneratedImagesPanel />
             </el-tab-pane>
@@ -25,6 +28,7 @@ import { ref } from "vue";
 import { useRouter } from "vue-router";
 import GeneratedImagesPanel from "../components/GeneratedImagesPanel.vue";
 import ModelMappingsPanel from "../components/ModelMappingsPanel.vue";
+import SizeMappingsPanel from "../components/SizeMappingsPanel.vue";
 
 const router = useRouter();
 const activeTab = ref("mappings");

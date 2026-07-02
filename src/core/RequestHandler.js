@@ -205,6 +205,34 @@ class RequestHandler {
         ).aspectRatio;
     }
 
+    _resolveOpenAIImageSizeConfig(size) {
+        const mappingResult = this.serverSystem.sizeMappingService?.resolve(size);
+        if (mappingResult?.changed) {
+            const imageConfig = {
+                aspectRatio: mappingResult.aspectRatio,
+            };
+            if (mappingResult.imageSize) {
+                imageConfig.imageSize = mappingResult.imageSize;
+            }
+
+            return {
+                imageConfig,
+                mapped: true,
+                openaiSize: mappingResult.openaiSize,
+            };
+        }
+
+        return {
+            imageConfig: {
+                aspectRatio: this._resolveOpenAIImageAspectRatio(size),
+            },
+            mapped: false,
+            openaiSize: String(size || "1024x1024")
+                .trim()
+                .toLowerCase(),
+        };
+    }
+
     _normalizeOpenAIImageResponseFormat(value) {
         const normalized = String(value || "")
             .trim()
@@ -224,14 +252,12 @@ class RequestHandler {
             initialTarget.model,
             initialTarget.operation || "generateContent"
         );
-        const aspectRatio = this._resolveOpenAIImageAspectRatio(body.size);
+        const sizeConfig = this._resolveOpenAIImageSizeConfig(body.size);
         const responseFormat = this._normalizeOpenAIImageResponseFormat(body.response_format);
         const n = Math.max(1, Math.min(Number.parseInt(body.n, 10) || 1, 4));
 
         const generationConfig = {
-            imageConfig: {
-                aspectRatio,
-            },
+            imageConfig: sizeConfig.imageConfig,
             responseModalities: ["IMAGE", "TEXT"],
         };
 
@@ -250,9 +276,12 @@ class RequestHandler {
         };
 
         return {
-            aspectRatio,
+            aspectRatio: sizeConfig.imageConfig.aspectRatio,
             googleRequest,
+            imageSize: sizeConfig.imageConfig.imageSize || null,
+            isSizeMapped: sizeConfig.mapped,
             model: mappedTarget.model,
+            openaiSize: sizeConfig.openaiSize,
             operation: mappedTarget.operation || "generateContent",
             prompt,
             requestedCount: n,
@@ -1368,7 +1397,7 @@ class RequestHandler {
             });
 
             this.logger.info(
-                `[OpenAI图片] 已转换为 Gemini 请求：model=${converted.model}, aspectRatio=${converted.aspectRatio}, responseFormat=${converted.responseFormat}, n=${converted.requestedCount}，请求ID：${requestId}`
+                `[OpenAI图片] 已转换为 Gemini 请求：model=${converted.model}, openaiSize=${converted.openaiSize}, aspectRatio=${converted.aspectRatio}, imageSize=${converted.imageSize || "默认"}, sizeMapped=${converted.isSizeMapped ? "是" : "否"}, responseFormat=${converted.responseFormat}, n=${converted.requestedCount}，请求ID：${requestId}`
             );
 
             try {

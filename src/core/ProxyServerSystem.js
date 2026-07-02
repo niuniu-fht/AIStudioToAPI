@@ -23,6 +23,7 @@ const RequestHandler = require("./RequestHandler");
 const UsageStatsService = require("./UsageStatsService");
 const GeneratedImageService = require("./GeneratedImageService");
 const ModelMappingService = require("./ModelMappingService");
+const SizeMappingService = require("./SizeMappingService");
 const ConfigLoader = require("../utils/ConfigLoader");
 const WebRoutes = require("../routes/WebRoutes");
 
@@ -40,6 +41,7 @@ class ProxyServerSystem extends EventEmitter {
 
         this.authSource = new AuthSource(this.logger);
         this.modelMappingService = new ModelMappingService(this.logger, this.config);
+        this.sizeMappingService = new SizeMappingService(this.logger);
         this.generatedImageService = new GeneratedImageService(this.logger);
         this.browserManager = new BrowserManager(this.logger, this.config, this.authSource);
         this.usageStatsService = new UsageStatsService(

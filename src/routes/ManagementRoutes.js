@@ -44,6 +44,36 @@ class ManagementRoutes {
             });
         });
 
+        app.get("/api/size-mappings", isAuthenticated, (req, res) => {
+            res.json({
+                mappings: this.serverSystem.sizeMappingService.list(),
+            });
+        });
+
+        app.put("/api/size-mappings", isAuthenticated, (req, res) => {
+            try {
+                const mapping = this.serverSystem.sizeMappingService.upsert(req.body || {});
+                res.json({ mapping, message: "sizeMappingSaved" });
+            } catch (error) {
+                res.status(400).json({ error: error.message, message: "sizeMappingSaveFailed" });
+            }
+        });
+
+        app.delete("/api/size-mappings/:id", isAuthenticated, (req, res) => {
+            const removed = this.serverSystem.sizeMappingService.remove(req.params.id);
+            if (!removed) {
+                return res.status(404).json({ message: "sizeMappingNotFound" });
+            }
+            return res.json({ message: "sizeMappingDeleted" });
+        });
+
+        app.post("/api/size-mappings/reset-defaults", isAuthenticated, (req, res) => {
+            res.json({
+                mappings: this.serverSystem.sizeMappingService.resetDefaults(),
+                message: "sizeMappingDefaultsRestored",
+            });
+        });
+
         app.get("/api/generated-images", isAuthenticated, (req, res) => {
             try {
                 res.json({
