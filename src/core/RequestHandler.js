@@ -131,7 +131,10 @@ class RequestHandler {
 
         const explicitSource = this._splitGenerationModelOperation(model);
         const sourceModelOperation = explicitSource.operation ? model : `${model}:${operation}`;
-        const resolved = this.serverSystem.modelMappingService.resolveModelOperation(sourceModelOperation);
+        const resolved = this.serverSystem.modelMappingService.resolveGenerationModelOperation(
+            explicitSource.model,
+            explicitSource.operation || operation
+        );
         if (!resolved.changed) {
             const targetModelOperation = `${explicitSource.model}:${explicitSource.operation || operation}`;
             return {
@@ -155,7 +158,7 @@ class RequestHandler {
             changed: true,
             model: mappedModel,
             operation: mappedOperation,
-            sourceModelOperation,
+            sourceModelOperation: resolved.sourceModel || sourceModelOperation,
             targetModelOperation: `${mappedModel}:${mappedOperation}`,
         };
     }

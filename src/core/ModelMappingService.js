@@ -117,6 +117,31 @@ class ModelMappingService {
         };
     }
 
+    resolveGenerationModelOperation(modelName, operation) {
+        const normalizedModel = this._normalizeModelOperation(modelName);
+        const normalizedOperation = String(operation || "").trim();
+        const withOperation = normalizedOperation ? `${normalizedModel}:${normalizedOperation}` : normalizedModel;
+        const exact = this.resolveModelOperation(withOperation);
+        if (exact.changed || !normalizedOperation) {
+            return exact;
+        }
+
+        const modelOnly = this.resolveModelOperation(normalizedModel);
+        if (!modelOnly.changed) {
+            return exact;
+        }
+
+        return {
+            ...modelOnly,
+            modelOperation: modelOnly.modelOperation.includes(":")
+                ? modelOnly.modelOperation
+                : `${modelOnly.modelOperation}:${normalizedOperation}`,
+            targetModel: modelOnly.targetModel.includes(":")
+                ? modelOnly.targetModel
+                : `${modelOnly.targetModel}:${normalizedOperation}`,
+        };
+    }
+
     resolveGenerationPath(requestPath) {
         if (typeof requestPath !== "string") {
             return { changed: false, path: requestPath };
@@ -128,7 +153,7 @@ class ModelMappingService {
         }
 
         const [, prefix, modelName, operation, suffix] = match;
-        const resolved = this.resolveModelOperation(`${modelName}:${operation}`);
+        const resolved = this.resolveGenerationModelOperation(modelName, operation);
         if (!resolved.changed) {
             return { changed: false, path: requestPath };
         }
