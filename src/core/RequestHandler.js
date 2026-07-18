@@ -220,10 +220,8 @@ class RequestHandler {
         if (mappingResult?.changed) {
             const imageConfig = {
                 aspectRatio: mappingResult.aspectRatio,
+                imageSize: mappingResult.imageSize || "4K",
             };
-            if (mappingResult.imageSize) {
-                imageConfig.imageSize = mappingResult.imageSize;
-            }
 
             return {
                 imageConfig,
@@ -235,6 +233,7 @@ class RequestHandler {
         return {
             imageConfig: {
                 aspectRatio: this._resolveOpenAIImageAspectRatio(size),
+                imageSize: "4K",
             },
             mapped: false,
             openaiSize: String(size || "1024x1024")
@@ -306,7 +305,7 @@ class RequestHandler {
 
         const generationConfig = {
             imageConfig: sizeConfig.imageConfig,
-            responseModalities: ["IMAGE", "TEXT"],
+            responseModalities: ["IMAGE"],
         };
 
         if (n > 1) {
