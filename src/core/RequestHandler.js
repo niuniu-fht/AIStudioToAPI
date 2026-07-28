@@ -215,7 +215,47 @@ class RequestHandler {
         ).aspectRatio;
     }
 
-    _resolveOpenAIImageSizeConfig(size) {
+    _isGemini31FlashImageModel(model) {
+        return (
+            String(model || "")
+                .trim()
+                .replace(/^models\//, "")
+                .toLowerCase() === "gemini-3.1-flash-image"
+        );
+    }
+
+    _shouldUseUpstreamAutoImageSize(size) {
+        const normalizedSize = String(size || "")
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "");
+
+        if (!normalizedSize) return false;
+        if (normalizedSize === "auto") return true;
+
+        const match = normalizedSize.match(/^(\d+)x(\d+)$/);
+        if (!match) return true;
+
+        const width = Number(match[1]);
+        const height = Number(match[2]);
+        return !width || !height;
+    }
+
+    _resolveOpenAIImageSizeConfig(size, targetModel) {
+        const openaiSize = String(size || "1024x1024")
+            .trim()
+            .toLowerCase();
+
+        if (this._isGemini31FlashImageModel(targetModel) && this._shouldUseUpstreamAutoImageSize(size)) {
+            return {
+                imageConfig: {
+                    imageSize: "4K",
+                },
+                mapped: false,
+                openaiSize,
+            };
+        }
+
         const mappingResult = this.serverSystem.sizeMappingService?.resolve(size);
         if (mappingResult?.changed) {
             const imageConfig = {
@@ -236,9 +276,7 @@ class RequestHandler {
                 imageSize: "4K",
             },
             mapped: false,
-            openaiSize: String(size || "1024x1024")
-                .trim()
-                .toLowerCase(),
+            openaiSize,
         };
     }
 
@@ -299,7 +337,7 @@ class RequestHandler {
             initialTarget.model,
             initialTarget.operation || "generateContent"
         );
-        const sizeConfig = this._resolveOpenAIImageSizeConfig(body.size);
+        const sizeConfig = this._resolveOpenAIImageSizeConfig(body.size, mappedTarget.model);
         const responseFormat = this._normalizeOpenAIImageResponseFormat(body.response_format);
         const n = Math.max(1, Math.min(Number.parseInt(body.n, 10) || 1, 4));
 
