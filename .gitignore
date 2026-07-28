@@ -40,3 +40,9 @@ debug_*.png
 debug_*.html
 proxylist.txt
 proxy_mapping.json
+
+# Codex local artifacts
+.codex_*.py
+.codex_deploy.tar.gz
+AGENTS.md
+browser-vnc/
