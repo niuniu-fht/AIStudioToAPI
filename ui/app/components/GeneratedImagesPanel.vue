@@ -4,12 +4,20 @@
             <div>
                 <h2>本地图片</h2>
                 <p>这里展示由 inlineData 落盘生成的图片文件，可预览、复制 URL 或批量删除。</p>
+                <p v-if="stats" class="storage-summary">
+                    当前 {{ stats.count }} 张 / {{ formatSize(stats.totalBytes) }}，超过
+                    {{ stats.cleanupThresholdMb }} MB 自动保留最近图片并清理约 {{ stats.cleanupTargetMb }} MB。
+                </p>
             </div>
             <div class="toolbar-actions">
                 <el-button @click="loadImages">刷新</el-button>
+                <el-button type="warning" :disabled="images.length === 0" @click="cleanupImages">
+                    清理 5000MB
+                </el-button>
                 <el-button type="danger" :disabled="selectedImages.length === 0" @click="deleteSelected">
                     批量删除
                 </el-button>
+                <el-button type="danger" :disabled="images.length === 0" @click="deleteAllImages"> 一键删除 </el-button>
             </div>
         </div>
 
@@ -112,6 +120,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 
 const images = ref([]);
 const selectedImages = ref([]);
+const stats = ref(null);
 const loading = ref(false);
 const detailsImage = ref(null);
 const detailsVisible = ref(false);
@@ -135,6 +144,7 @@ const loadImages = async () => {
     try {
         const data = await requestJson("/api/generated-images");
         images.value = data.images || [];
+        stats.value = data.stats || null;
     } catch (error) {
         ElMessage.error(`加载失败：${error.message}`);
     } finally {
@@ -205,6 +215,44 @@ const deleteSelected = async () => {
     }
 };
 
+const deleteAllImages = async () => {
+    try {
+        await ElMessageBox.confirm(`确定删除全部 ${images.value.length} 张图片？此操作不可恢复。`, "确认一键删除", {
+            type: "warning",
+        });
+        const data = await requestJson("/api/generated-images/all", {
+            method: "DELETE",
+        });
+        if (data.failed?.length) {
+            ElMessage.warning(`已删除 ${data.deleted.length} 张，失败 ${data.failed.length} 张`);
+        } else {
+            ElMessage.success(`已删除 ${data.deleted.length} 张图片`);
+        }
+        await loadImages();
+    } catch (error) {
+        if (error !== "cancel") {
+            ElMessage.error(`一键删除失败：${error.message || error}`);
+        }
+    }
+};
+
+const cleanupImages = async () => {
+    try {
+        await ElMessageBox.confirm("确定按旧到新清理约 5000MB 图片，并保留最近生成的图片？", "确认清理", {
+            type: "warning",
+        });
+        const data = await requestJson("/api/generated-images/cleanup", {
+            method: "POST",
+        });
+        ElMessage.success(`已清理 ${data.deleted?.length || 0} 张，释放 ${formatSize(data.freedBytes || 0)}`);
+        await loadImages();
+    } catch (error) {
+        if (error !== "cancel") {
+            ElMessage.error(`清理失败：${error.message || error}`);
+        }
+    }
+};
+
 onMounted(loadImages);
 </script>
 
@@ -224,6 +272,12 @@ onMounted(loadImages);
     p {
         margin: 0;
         color: #667085;
+    }
+
+    .storage-summary {
+        margin-top: 6px;
+        color: #b45309;
+        font-size: 13px;
     }
 }
 

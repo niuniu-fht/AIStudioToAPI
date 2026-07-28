@@ -78,6 +78,7 @@ class ManagementRoutes {
             try {
                 res.json({
                     images: this.serverSystem.generatedImageService.list(),
+                    stats: this.serverSystem.generatedImageService.stats(),
                 });
             } catch (error) {
                 res.status(500).json({ error: error.message, message: "generatedImagesListFailed" });
@@ -93,6 +94,30 @@ class ManagementRoutes {
                 });
             } catch (error) {
                 res.status(400).json({ error: error.message, message: "generatedImagesDeleteFailed" });
+            }
+        });
+
+        app.delete("/api/generated-images/all", isAuthenticated, (req, res) => {
+            try {
+                const result = this.serverSystem.generatedImageService.removeAll();
+                res.json({
+                    ...result,
+                    message: result.failed.length > 0 ? "generatedImagesDeletePartial" : "generatedImagesDeleted",
+                });
+            } catch (error) {
+                res.status(400).json({ error: error.message, message: "generatedImagesDeleteFailed" });
+            }
+        });
+
+        app.post("/api/generated-images/cleanup", isAuthenticated, (req, res) => {
+            try {
+                const result = this.serverSystem.generatedImageService.cleanup({ force: true });
+                res.json({
+                    ...result,
+                    message: result.failed.length > 0 ? "generatedImagesCleanupPartial" : "generatedImagesCleaned",
+                });
+            } catch (error) {
+                res.status(400).json({ error: error.message, message: "generatedImagesCleanupFailed" });
             }
         });
     }

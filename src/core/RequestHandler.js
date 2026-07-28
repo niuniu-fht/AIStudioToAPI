@@ -4081,6 +4081,12 @@ class RequestHandler {
             this.logger.warn(`[OpenAI图片流程] 写入图片元数据失败：filename=${filename}, error=${error.message}`);
         }
 
+        try {
+            this.serverSystem.generatedImageService?.cleanupIfNeeded();
+        } catch (error) {
+            this.logger.warn(`[OpenAI图片流程] 自动清理本地图片失败：error=${error.message}`);
+        }
+
         const requestIdText = req?.__openAIImagesRequestId ? `，请求ID：${req.__openAIImagesRequestId}` : "";
         this.logger.info(
             `[OpenAI图片流程] 图片已落盘：filename=${filename}, mime=${inlineData.mimeType || "unknown"}, bytes=${imageBuffer.length}, url=${inlineData.fileUri}${requestIdText}`
