@@ -11,6 +11,7 @@ const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gi
 const MB = 1024 * 1024;
 const DEFAULT_CLEANUP_THRESHOLD_MB = 10000;
 const DEFAULT_CLEANUP_TARGET_MB = 5000;
+const DEFAULT_CLEANUP_MAX_COUNT = 2000;
 const DEFAULT_IMAGE_ROUTE = "/generated-images";
 
 class GeneratedImageService {
@@ -22,6 +23,7 @@ class GeneratedImageService {
             DEFAULT_CLEANUP_THRESHOLD_MB
         );
         this.cleanupTargetBytes = this._readMegabyteEnv("GENERATED_IMAGE_CLEANUP_TARGET_MB", DEFAULT_CLEANUP_TARGET_MB);
+        this.cleanupMaxCount = this._readIntegerEnv("GENERATED_IMAGE_CLEANUP_MAX_COUNT", DEFAULT_CLEANUP_MAX_COUNT);
     }
 
     list() {
@@ -46,6 +48,7 @@ class GeneratedImageService {
         const totalBytes = records.reduce((sum, record) => sum + record.stat.size, 0);
 
         return {
+            cleanupMaxCount: this.cleanupMaxCount,
             cleanupTargetBytes: this.cleanupTargetBytes,
             cleanupTargetMb: Math.round(this.cleanupTargetBytes / MB),
             cleanupThresholdBytes: this.cleanupThresholdBytes,
@@ -107,15 +110,20 @@ class GeneratedImageService {
         const force = options.force === true;
         const records = this._listImageRecords();
         const totalBytes = records.reduce((sum, record) => sum + record.stat.size, 0);
+        const overBytes = totalBytes > this.cleanupThresholdBytes;
+        const overCount = this.cleanupMaxCount > 0 && records.length > this.cleanupMaxCount;
 
         const result = {
             deleted: [],
             failed: [],
             freedBytes: 0,
-            skipped: !force && totalBytes <= this.cleanupThresholdBytes,
+            maxCount: this.cleanupMaxCount,
+            skipped: !force && !overBytes && !overCount,
             targetBytes: this.cleanupTargetBytes,
             thresholdBytes: this.cleanupThresholdBytes,
             totalBytesBefore: totalBytes,
+            totalCountAfter: records.length,
+            totalCountBefore: records.length,
         };
 
         if (result.skipped || records.length === 0) {
@@ -125,7 +133,11 @@ class GeneratedImageService {
 
         const oldestFirst = [...records].sort((a, b) => a.stat.mtimeMs - b.stat.mtimeMs);
         for (const record of oldestFirst) {
-            if (result.freedBytes >= this.cleanupTargetBytes) break;
+            const stillOverBytes = force || totalBytes - result.freedBytes > this.cleanupThresholdBytes;
+            const bytesTargetReached = result.freedBytes >= this.cleanupTargetBytes;
+            const stillOverCount =
+                this.cleanupMaxCount > 0 && records.length - result.deleted.length > this.cleanupMaxCount;
+            if (!stillOverCount && (!stillOverBytes || bytesTargetReached)) break;
 
             try {
                 fs.unlinkSync(record.path);
@@ -141,9 +153,10 @@ class GeneratedImageService {
         }
 
         result.totalBytesAfter = Math.max(0, totalBytes - result.freedBytes);
+        result.totalCountAfter = Math.max(0, records.length - result.deleted.length);
         if (result.deleted.length > 0) {
             this.logger?.info(
-                `[GeneratedImageService] Cleanup deleted ${result.deleted.length} images, freed ${Math.round(result.freedBytes / MB)} MB.`
+                `[GeneratedImageService] Cleanup deleted ${result.deleted.length} images, freed ${Math.round(result.freedBytes / MB)} MB, count ${result.totalCountBefore} -> ${result.totalCountAfter}.`
             );
         }
         return result;
@@ -195,6 +208,11 @@ class GeneratedImageService {
         const value = Number.parseInt(process.env[name], 10);
         const mb = Number.isFinite(value) && value > 0 ? value : defaultMb;
         return mb * MB;
+    }
+
+    _readIntegerEnv(name, defaultValue) {
+        const value = Number.parseInt(process.env[name], 10);
+        return Number.isFinite(value) && value >= 0 ? value : defaultValue;
     }
 
     _buildImageUrl(filename) {

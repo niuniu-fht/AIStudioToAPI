@@ -117,6 +117,7 @@ class ProxyServerSystem extends EventEmitter {
 
         this.httpServer = null;
         this.wsServer = null;
+        this.generatedImageCleanupInterval = null;
         this.webRoutes = new WebRoutes(this);
     }
 
@@ -135,6 +136,20 @@ class ProxyServerSystem extends EventEmitter {
                 this.logger.error(`[System] Error during stale queue cleanup: ${error.message}`);
             }
         }, 300000); // Run every 5 minutes
+
+        const generatedImageCleanupIntervalMs = this._readGeneratedImageCleanupIntervalMs();
+        if (generatedImageCleanupIntervalMs > 0) {
+            this.generatedImageCleanupInterval = setInterval(() => {
+                try {
+                    this.generatedImageService.cleanupIfNeeded();
+                } catch (error) {
+                    this.logger.warn(`[System] Error during generated image cleanup: ${error.message}`);
+                }
+            }, generatedImageCleanupIntervalMs);
+            this.logger.info(
+                `[System] Generated image cleanup scheduled every ${Math.round(generatedImageCleanupIntervalMs / 60000)} minute(s).`
+            );
+        }
 
         const allAvailableIndices = this.authSource.availableIndices;
         const allRotationIndices = this.authSource.getRotationIndices();
@@ -641,6 +656,12 @@ class ProxyServerSystem extends EventEmitter {
             this.logger.info("[System] Stopped stale queue cleanup interval");
         }
 
+        if (this.generatedImageCleanupInterval) {
+            clearInterval(this.generatedImageCleanupInterval);
+            this.generatedImageCleanupInterval = null;
+            this.logger.info("[System] Stopped generated image cleanup interval");
+        }
+
         // Close all message queues
         if (this.connectionRegistry) {
             this.connectionRegistry.closeAllMessageQueues();
@@ -674,6 +695,12 @@ class ProxyServerSystem extends EventEmitter {
             closeServer(this.httpServer, "HTTP server"),
         ]);
         this.logger.info("[System] Shutdown complete");
+    }
+
+    _readGeneratedImageCleanupIntervalMs() {
+        const value = Number.parseInt(process.env.GENERATED_IMAGE_CLEANUP_INTERVAL_MINUTES, 10);
+        const minutes = Number.isFinite(value) && value >= 0 ? value : 60;
+        return minutes * 60 * 1000;
     }
 }
 
