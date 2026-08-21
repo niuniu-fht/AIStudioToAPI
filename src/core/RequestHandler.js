@@ -4123,7 +4123,7 @@ class RequestHandler {
 
     _transformGeminiNativeResponseBuffer(responseBodyBuffer, req) {
         const shouldStripThoughtSignature = this._shouldStripThoughtSignature();
-        const shouldReplaceImageData = this._isImageUrlResponseMode();
+        const shouldReplaceImageData = this._isImageUrlResponseMode() && Boolean(req?.__openAIImagesRequestId);
 
         if (!shouldStripThoughtSignature && !shouldReplaceImageData) {
             return responseBodyBuffer;
