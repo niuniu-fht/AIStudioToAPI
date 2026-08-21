@@ -548,6 +548,17 @@ class RequestProcessor {
                             "16:9",
                             "21:9",
                         ]);
+                        if (bodyObj.generationConfig.responseFormat?.image) {
+                            bodyObj.generationConfig.imageConfig = {
+                                ...bodyObj.generationConfig.responseFormat.image,
+                                ...(bodyObj.generationConfig.imageConfig || {}),
+                            };
+                            delete bodyObj.generationConfig.responseFormat;
+                            Logger.debug("Image model detected, converted responseFormat.image to imageConfig");
+                        } else if (bodyObj.generationConfig.responseFormat) {
+                            delete bodyObj.generationConfig.responseFormat;
+                            Logger.debug("Image model detected, removed unsupported responseFormat");
+                        }
                         const imageConfig = bodyObj.generationConfig.imageConfig;
                         if (imageConfig && typeof imageConfig === "object") {
                             const aspectRatio = String(imageConfig.aspectRatio || "").trim();

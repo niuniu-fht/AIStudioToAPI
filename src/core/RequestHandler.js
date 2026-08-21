@@ -5318,8 +5318,20 @@ class RequestHandler {
             return;
         }
 
-        const imageConfig = generationConfig.imageConfig;
-        if (imageConfig && typeof imageConfig === "object") {
+        if (generationConfig.responseFormat?.image) {
+            generationConfig.imageConfig = {
+                ...generationConfig.responseFormat.image,
+                ...(generationConfig.imageConfig || {}),
+            };
+            delete generationConfig.responseFormat;
+            this.logger.debug("[Proxy] Image model request: converted responseFormat.image to imageConfig.");
+        } else if (generationConfig.responseFormat) {
+            delete generationConfig.responseFormat;
+            this.logger.debug("[Proxy] Image model request: removed unsupported responseFormat.");
+        }
+
+        const normalizedImageConfig = generationConfig.imageConfig;
+        if (normalizedImageConfig && typeof normalizedImageConfig === "object") {
             const validAspectRatios = new Set([
                 "1:1",
                 "1:4",
@@ -5336,17 +5348,17 @@ class RequestHandler {
                 "16:9",
                 "21:9",
             ]);
-            const aspectRatio = String(imageConfig.aspectRatio || "").trim();
+            const aspectRatio = String(normalizedImageConfig.aspectRatio || "").trim();
             if (aspectRatio && (aspectRatio.toLowerCase() === "auto" || !validAspectRatios.has(aspectRatio))) {
-                delete imageConfig.aspectRatio;
+                delete normalizedImageConfig.aspectRatio;
                 this.logger.debug(
                     `[Proxy] Image model request: removed unsupported aspectRatio "${aspectRatio}" to use upstream auto.`
                 );
             }
-            if (typeof imageConfig.imageSize === "string") {
-                imageConfig.imageSize = imageConfig.imageSize.trim().toUpperCase();
+            if (typeof normalizedImageConfig.imageSize === "string") {
+                normalizedImageConfig.imageSize = normalizedImageConfig.imageSize.trim().toUpperCase();
             }
-            if (Object.keys(imageConfig).length === 0) {
+            if (Object.keys(normalizedImageConfig).length === 0) {
                 delete generationConfig.imageConfig;
             }
         }
