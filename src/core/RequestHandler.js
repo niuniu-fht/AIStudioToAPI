@@ -560,6 +560,7 @@ class RequestHandler {
     _normalizeBase64ImageString(value, sourceLabel = "raw_base64") {
         const normalized = String(value || "")
             .trim()
+            .replace(/^["']|["']$/g, "")
             .replace(/\s+/g, "")
             .replace(/-/g, "+")
             .replace(/_/g, "/");
@@ -701,6 +702,20 @@ class RequestHandler {
         }
 
         if (typeof input === "object") {
+            const imageUrlValue =
+                typeof input.image_url === "string"
+                    ? input.image_url
+                    : input.image_url?.url ||
+                      input.imageUrl?.url ||
+                      input.input_image?.image_url ||
+                      input.input_image?.url ||
+                      input.url;
+            if (imageUrlValue) {
+                return this._normalizeOpenAIEditImageInput(imageUrlValue, fallbackMimeType, {
+                    ...meta,
+                    source: "object.image_url",
+                });
+            }
             if (input.data && input.mimeType) {
                 return this._normalizeOpenAIEditImageInput(String(input.data).replace(/^data:[^,]+,/, ""), input.mimeType, {
                     ...meta,
@@ -721,14 +736,16 @@ class RequestHandler {
             }
         }
 
-        const value = String(input).trim();
-        const dataUrlMatch = value.match(/^data:(image\/[^;]+);base64,(.+)$/);
+        const value = String(input)
+            .trim()
+            .replace(/^["']|["']$/g, "");
+        const dataUrlMatch = value.match(/^data:([^,;]+)?(?:;[^,]*)?;base64,([\s\S]+)$/i);
         if (dataUrlMatch) {
             const inlineData = this._normalizeBase64ImageString(dataUrlMatch[2], "data_url");
             this._logOpenAIEditImageInputMeta({
                 ...meta,
                 bytes: inlineData.byteLength,
-                contentType: dataUrlMatch[1],
+                contentType: dataUrlMatch[1] || "",
                 mimeType: inlineData.mimeType,
                 sniffedMimeType: inlineData.mimeType,
                 source: "data_url",
