@@ -320,9 +320,7 @@ class RequestHandler {
 
         if (this._isGemini31FlashImageModel(targetModel) && this._shouldUseUpstreamAutoImageSize(size)) {
             return {
-                imageConfig: {
-                    imageSize: "4K",
-                },
+                imageConfig: {},
                 mapped: false,
                 openaiSize,
             };
@@ -400,9 +398,12 @@ class RequestHandler {
         const n = Math.max(1, Math.min(Number.parseInt(body.n, 10) || 1, 4));
 
         const generationConfig = {
-            imageConfig: sizeConfig.imageConfig,
             responseModalities: ["IMAGE"],
         };
+
+        if (sizeConfig.imageConfig && Object.keys(sizeConfig.imageConfig).length > 0) {
+            generationConfig.imageConfig = sizeConfig.imageConfig;
+        }
 
         if (n > 1) {
             generationConfig.candidateCount = n;
