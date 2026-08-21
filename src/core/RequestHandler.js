@@ -518,70 +518,242 @@ class RequestHandler {
         return { fields, files };
     }
 
-    async _downloadImageToInlineData(imageUrl) {
-        const response = await fetch(imageUrl);
-        if (!response.ok) {
-            throw new Error(`下载图片失败，HTTP ${response.status}`);
+    _sniffImageMime(buffer) {
+        if (!Buffer.isBuffer(buffer) || buffer.length < 4) {
+            return null;
         }
-        const arrayBuffer = await response.arrayBuffer();
+
+        if (
+            buffer.length >= 8 &&
+            buffer[0] === 0x89 &&
+            buffer[1] === 0x50 &&
+            buffer[2] === 0x4e &&
+            buffer[3] === 0x47 &&
+            buffer[4] === 0x0d &&
+            buffer[5] === 0x0a &&
+            buffer[6] === 0x1a &&
+            buffer[7] === 0x0a
+        ) {
+            return "image/png";
+        }
+
+        if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+            return "image/jpeg";
+        }
+
+        if (
+            buffer.length >= 12 &&
+            buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+            buffer.subarray(8, 12).toString("ascii") === "WEBP"
+        ) {
+            return "image/webp";
+        }
+
+        const gifHeader = buffer.length >= 6 ? buffer.subarray(0, 6).toString("ascii") : "";
+        if (gifHeader === "GIF87a" || gifHeader === "GIF89a") {
+            return "image/gif";
+        }
+
+        return null;
+    }
+
+    _normalizeBase64ImageString(value, sourceLabel = "raw_base64") {
+        const normalized = String(value || "")
+            .trim()
+            .replace(/\s+/g, "")
+            .replace(/-/g, "+")
+            .replace(/_/g, "/");
+
+        if (!normalized || !/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+            const error = new Error(`${sourceLabel} 不是有效 base64 图片数据`);
+            error.exposeToClient = true;
+            throw error;
+        }
+
+        const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+        const buffer = Buffer.from(padded, "base64");
+        const mimeType = this._sniffImageMime(buffer);
+        if (!mimeType) {
+            const error = new Error(`${sourceLabel} 解码后不是有效图片，bytes=${buffer.length}`);
+            error.exposeToClient = true;
+            throw error;
+        }
+
         return {
-            data: Buffer.from(arrayBuffer).toString("base64"),
-            mimeType: response.headers.get("content-type") || "image/jpeg",
+            data: buffer.toString("base64"),
+            mimeType,
+            byteLength: buffer.length,
         };
     }
 
-    async _normalizeOpenAIEditImageInput(input, fallbackMimeType = "image/png") {
+    _bufferToInlineImageData(buffer, fallbackMimeType = "image/png", sourceLabel = "buffer") {
+        const sniffedMimeType = this._sniffImageMime(buffer);
+        const mimeType =
+            sniffedMimeType ||
+            (typeof fallbackMimeType === "string" && fallbackMimeType.startsWith("image/")
+                ? fallbackMimeType
+                : null);
+
+        if (!mimeType) {
+            const error = new Error(`${sourceLabel} 不是有效图片，bytes=${buffer?.length || 0}`);
+            error.exposeToClient = true;
+            throw error;
+        }
+
+        return {
+            data: buffer.toString("base64"),
+            mimeType,
+            byteLength: buffer.length,
+            sniffedMimeType,
+        };
+    }
+
+    _logOpenAIEditImageInputMeta(meta = {}) {
+        const requestIdText = meta.requestId ? `[${meta.requestId}]` : "";
+        const indexText = Number.isInteger(meta.index) ? `#${meta.index}` : "";
+        const previewText = meta.preview ? `, preview="${meta.preview}"` : "";
+        const statusText = meta.status ? `, status=${meta.status}` : "";
+        const contentTypeText = meta.contentType ? `, contentType=${meta.contentType}` : "";
+        const sniffedText = meta.sniffedMimeType ? `, sniffed=${meta.sniffedMimeType}` : "";
+        this.logger.info(
+            `[OpenAI图片流程]${requestIdText} 编辑参考图${indexText}: source=${meta.source || "unknown"}, mime=${meta.mimeType || "unknown"}, bytes=${meta.bytes || 0}${statusText}${contentTypeText}${sniffedText}${previewText}`
+        );
+    }
+
+    async _downloadImageToInlineData(imageUrl, meta = {}) {
+        const response = await fetch(imageUrl, {
+            headers: {
+                Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            },
+            redirect: "follow",
+        });
+        if (!response.ok) {
+            const error = new Error(`下载图片失败，HTTP ${response.status}`);
+            error.exposeToClient = true;
+            throw error;
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const sniffedMimeType = this._sniffImageMime(buffer);
+        const contentType = response.headers.get("content-type") || "";
+        if (!sniffedMimeType) {
+            this._logOpenAIEditImageInputMeta({
+                ...meta,
+                bytes: buffer.length,
+                contentType,
+                mimeType: contentType || "unknown",
+                source: "url",
+                status: response.status,
+            });
+            const error = new Error(`图片 URL 没有返回有效图片，HTTP ${response.status}, contentType=${contentType || "unknown"}, bytes=${buffer.length}`);
+            error.exposeToClient = true;
+            throw error;
+        }
+
+        this._logOpenAIEditImageInputMeta({
+            ...meta,
+            bytes: buffer.length,
+            contentType,
+            mimeType: sniffedMimeType,
+            sniffedMimeType,
+            source: "url",
+            status: response.status,
+        });
+
+        return {
+            data: buffer.toString("base64"),
+            mimeType: sniffedMimeType,
+        };
+    }
+
+    async _normalizeOpenAIEditImageInput(input, fallbackMimeType = "image/png", meta = {}) {
         if (!input) return null;
 
         if (Buffer.isBuffer(input)) {
-            return {
-                data: input.toString("base64"),
-                mimeType: fallbackMimeType,
-            };
+            const inlineData = this._bufferToInlineImageData(input, fallbackMimeType, "buffer");
+            this._logOpenAIEditImageInputMeta({
+                ...meta,
+                bytes: inlineData.byteLength,
+                mimeType: inlineData.mimeType,
+                sniffedMimeType: inlineData.sniffedMimeType,
+                source: "buffer",
+            });
+            delete inlineData.byteLength;
+            delete inlineData.sniffedMimeType;
+            return inlineData;
         }
 
         if (input.buffer && Buffer.isBuffer(input.buffer)) {
-            return {
-                data: input.buffer.toString("base64"),
-                mimeType: input.mimeType || fallbackMimeType,
-            };
+            const inlineData = this._bufferToInlineImageData(input.buffer, input.mimeType || fallbackMimeType, "multipart");
+            this._logOpenAIEditImageInputMeta({
+                ...meta,
+                bytes: inlineData.byteLength,
+                contentType: input.mimeType || "",
+                mimeType: inlineData.mimeType,
+                sniffedMimeType: inlineData.sniffedMimeType,
+                source: "multipart",
+            });
+            delete inlineData.byteLength;
+            delete inlineData.sniffedMimeType;
+            return inlineData;
         }
 
         if (typeof input === "object") {
             if (input.data && input.mimeType) {
-                return {
-                    data: String(input.data).replace(/^data:[^,]+,/, ""),
-                    mimeType: input.mimeType,
-                };
+                return this._normalizeOpenAIEditImageInput(String(input.data).replace(/^data:[^,]+,/, ""), input.mimeType, {
+                    ...meta,
+                    source: "object.data",
+                });
             }
             if (input.b64_json) {
-                return {
-                    data: String(input.b64_json),
-                    mimeType: input.mimeType || fallbackMimeType,
-                };
+                return this._normalizeOpenAIEditImageInput(input.b64_json, input.mimeType || fallbackMimeType, {
+                    ...meta,
+                    source: "object.b64_json",
+                });
             }
             if (input.url) {
-                return this._normalizeOpenAIEditImageInput(input.url, fallbackMimeType);
+                return this._normalizeOpenAIEditImageInput(input.url, fallbackMimeType, {
+                    ...meta,
+                    source: "object.url",
+                });
             }
         }
 
         const value = String(input).trim();
         const dataUrlMatch = value.match(/^data:(image\/[^;]+);base64,(.+)$/);
         if (dataUrlMatch) {
-            return {
-                data: dataUrlMatch[2],
-                mimeType: dataUrlMatch[1],
-            };
+            const inlineData = this._normalizeBase64ImageString(dataUrlMatch[2], "data_url");
+            this._logOpenAIEditImageInputMeta({
+                ...meta,
+                bytes: inlineData.byteLength,
+                contentType: dataUrlMatch[1],
+                mimeType: inlineData.mimeType,
+                sniffedMimeType: inlineData.mimeType,
+                source: "data_url",
+            });
+            delete inlineData.byteLength;
+            return inlineData;
         }
 
         if (/^https?:\/\//i.test(value)) {
-            return await this._downloadImageToInlineData(value);
+            return await this._downloadImageToInlineData(value, {
+                ...meta,
+                preview: value.slice(0, 120),
+            });
         }
 
-        return {
-            data: value,
-            mimeType: fallbackMimeType,
-        };
+        const inlineData = this._normalizeBase64ImageString(value, "raw_base64");
+        this._logOpenAIEditImageInputMeta({
+            ...meta,
+            bytes: inlineData.byteLength,
+            mimeType: inlineData.mimeType,
+            sniffedMimeType: inlineData.mimeType,
+            source: meta.source || "raw_base64",
+        });
+        delete inlineData.byteLength;
+        return inlineData;
     }
 
     async _buildGeminiRequestFromOpenAIImageEdits(req) {
@@ -606,8 +778,12 @@ class RequestHandler {
         }
 
         const inlineImages = [];
-        for (const imageInput of rawImages) {
-            const inlineData = await this._normalizeOpenAIEditImageInput(imageInput);
+        for (let imageIndex = 0; imageIndex < rawImages.length; imageIndex++) {
+            const imageInput = rawImages[imageIndex];
+            const inlineData = await this._normalizeOpenAIEditImageInput(imageInput, "image/png", {
+                index: imageIndex,
+                requestId: req.__openAIImagesRequestId,
+            });
             if (inlineData) {
                 inlineImages.push(inlineData);
             }
@@ -1496,7 +1672,12 @@ class RequestHandler {
                 converted = await buildConvertedRequest();
             } catch (error) {
                 this.logger.error(`${flowPrefix} 请求参数转换失败：${error.message}`);
-                return this._sendErrorResponse(res, 400, "Invalid OpenAI images request.", "invalid_request_error");
+                return this._sendErrorResponse(
+                    res,
+                    400,
+                    error.exposeToClient ? error.message : "Invalid OpenAI images request.",
+                    "invalid_request_error"
+                );
             }
 
             this.logger.info(
