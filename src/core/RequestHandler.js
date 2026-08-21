@@ -32,6 +32,23 @@ const GENERATED_IMAGE_EXTENSIONS = {
     "image/png": "png",
     "image/webp": "webp",
 };
+const GEMINI_IMAGE_ASPECT_RATIO_CANDIDATES = [
+    { aspectRatio: "1:1", ratio: 1 },
+    { aspectRatio: "1:4", ratio: 1 / 4 },
+    { aspectRatio: "1:8", ratio: 1 / 8 },
+    { aspectRatio: "2:3", ratio: 2 / 3 },
+    { aspectRatio: "3:2", ratio: 3 / 2 },
+    { aspectRatio: "3:4", ratio: 3 / 4 },
+    { aspectRatio: "4:1", ratio: 4 },
+    { aspectRatio: "4:3", ratio: 4 / 3 },
+    { aspectRatio: "4:5", ratio: 4 / 5 },
+    { aspectRatio: "5:4", ratio: 5 / 4 },
+    { aspectRatio: "8:1", ratio: 8 },
+    { aspectRatio: "9:16", ratio: 9 / 16 },
+    { aspectRatio: "16:9", ratio: 16 / 9 },
+    { aspectRatio: "21:9", ratio: 21 / 9 },
+];
+const GEMINI_IMAGE_ASPECT_RATIOS = new Set(GEMINI_IMAGE_ASPECT_RATIO_CANDIDATES.map(item => item.aspectRatio));
 
 class RequestHandler {
     constructor(serverSystem, connectionRegistry, logger, browserManager, config, authSource) {
@@ -194,6 +211,10 @@ class RequestHandler {
         const normalizedSize = String(size || "")
             .trim()
             .toLowerCase();
+
+        const ratioSize = this._normalizeOpenAIImageRatioSize(normalizedSize);
+        if (ratioSize) return ratioSize;
+
         const match = normalizedSize.match(/^(\d+)x(\d+)$/);
         if (!match) return "1:1";
 
@@ -202,17 +223,54 @@ class RequestHandler {
         if (!width || !height) return "1:1";
 
         const ratio = width / height;
-        const candidates = [
-            { aspectRatio: "1:1", ratio: 1 },
-            { aspectRatio: "16:9", ratio: 16 / 9 },
-            { aspectRatio: "9:16", ratio: 9 / 16 },
-            { aspectRatio: "4:3", ratio: 4 / 3 },
-            { aspectRatio: "3:4", ratio: 3 / 4 },
-        ];
-
-        return candidates.reduce((best, current) =>
+        return GEMINI_IMAGE_ASPECT_RATIO_CANDIDATES.reduce((best, current) =>
             Math.abs(current.ratio - ratio) < Math.abs(best.ratio - ratio) ? current : best
         ).aspectRatio;
+    }
+
+    _normalizeOpenAIImageRatioSize(size) {
+        const normalizedSize = String(size || "")
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "");
+        const match = normalizedSize.match(/^(\d+):(\d+)$/);
+        if (!match) return null;
+
+        const width = Number(match[1]);
+        const height = Number(match[2]);
+        if (!width || !height) return null;
+
+        const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+        const divisor = gcd(width, height);
+        const ratio = `${width / divisor}:${height / divisor}`;
+        return GEMINI_IMAGE_ASPECT_RATIOS.has(ratio)
+            ? ratio
+            : this._resolveNearestGeminiImageAspectRatio(width, height);
+    }
+
+    _resolveNearestGeminiImageAspectRatio(width, height) {
+        const ratio = width / height;
+        return GEMINI_IMAGE_ASPECT_RATIO_CANDIDATES.reduce((best, current) =>
+            Math.abs(current.ratio - ratio) < Math.abs(best.ratio - ratio) ? current : best
+        ).aspectRatio;
+    }
+
+    _resolveOpenAIImageSizeTier(size) {
+        const normalizedSize = String(size || "")
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "");
+
+        if (this._normalizeOpenAIImageRatioSize(normalizedSize)) {
+            return "2K";
+        }
+
+        const match = normalizedSize.match(/^(\d+)x(\d+)$/);
+        if (!match) return "2K";
+
+        const maxSide = Math.max(Number(match[1]), Number(match[2]));
+        if (!maxSide) return "2K";
+        return maxSide > 2560 ? "4K" : "2K";
     }
 
     _isGemini31FlashImageModel(model) {
@@ -246,6 +304,20 @@ class RequestHandler {
             .trim()
             .toLowerCase();
 
+        const mappingResult = this.serverSystem.sizeMappingService?.resolve(size);
+        if (mappingResult?.changed) {
+            const imageConfig = {
+                aspectRatio: mappingResult.aspectRatio,
+                imageSize: mappingResult.imageSize || this._resolveOpenAIImageSizeTier(mappingResult.openaiSize),
+            };
+
+            return {
+                imageConfig,
+                mapped: true,
+                openaiSize: mappingResult.openaiSize,
+            };
+        }
+
         if (this._isGemini31FlashImageModel(targetModel) && this._shouldUseUpstreamAutoImageSize(size)) {
             return {
                 imageConfig: {
@@ -256,24 +328,10 @@ class RequestHandler {
             };
         }
 
-        const mappingResult = this.serverSystem.sizeMappingService?.resolve(size);
-        if (mappingResult?.changed) {
-            const imageConfig = {
-                aspectRatio: mappingResult.aspectRatio,
-                imageSize: mappingResult.imageSize || "4K",
-            };
-
-            return {
-                imageConfig,
-                mapped: true,
-                openaiSize: mappingResult.openaiSize,
-            };
-        }
-
         return {
             imageConfig: {
                 aspectRatio: this._resolveOpenAIImageAspectRatio(size),
-                imageSize: "4K",
+                imageSize: this._resolveOpenAIImageSizeTier(size),
             },
             mapped: false,
             openaiSize,
