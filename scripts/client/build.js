@@ -530,6 +530,47 @@ class RequestProcessor {
                             delete bodyObj.generationConfig.responseJsonSchema;
                         }
                     }
+
+                    if (isImageModel && bodyObj.generationConfig) {
+                        const validImageAspectRatios = new Set([
+                            "1:1",
+                            "1:4",
+                            "1:8",
+                            "2:3",
+                            "3:2",
+                            "3:4",
+                            "4:1",
+                            "4:3",
+                            "4:5",
+                            "5:4",
+                            "8:1",
+                            "9:16",
+                            "16:9",
+                            "21:9",
+                        ]);
+                        const imageConfig = bodyObj.generationConfig.imageConfig;
+                        if (imageConfig && typeof imageConfig === "object") {
+                            const aspectRatio = String(imageConfig.aspectRatio || "").trim();
+                            if (aspectRatio) {
+                                if (aspectRatio.toLowerCase() === "auto" || !validImageAspectRatios.has(aspectRatio)) {
+                                    delete imageConfig.aspectRatio;
+                                    Logger.debug(
+                                        `Image model detected, removed unsupported aspectRatio "${aspectRatio}" to use upstream auto`
+                                    );
+                                }
+                            }
+                            if (typeof imageConfig.imageSize === "string") {
+                                imageConfig.imageSize = imageConfig.imageSize.trim().toUpperCase();
+                            }
+                            if (Object.keys(imageConfig).length === 0) {
+                                delete bodyObj.generationConfig.imageConfig;
+                            }
+                        }
+                        if (Number(bodyObj.generationConfig.candidateCount) > 1) {
+                            bodyObj.generationConfig.candidateCount = 1;
+                            Logger.debug("Image model detected, capped candidateCount to 1");
+                        }
+                    }
                     if (isComputerUseModel || isRoboticsModel) {
                         if (bodyObj.generationConfig?.responseModalities) {
                             delete bodyObj.generationConfig.responseModalities;

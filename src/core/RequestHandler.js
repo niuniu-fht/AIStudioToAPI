@@ -5204,6 +5204,7 @@ class RequestHandler {
             if (bodyObj.tools) {
                 this.formatConverter.sanitizeGeminiTools(bodyObj);
             }
+            this._sanitizeNativeImageGenerationRequest(bodyObj, cleanPath);
         }
 
         const embedContentMatch = cleanPath.match(/^\/v1beta\/models\/([^:]+):embedContent$/);
@@ -5307,6 +5308,53 @@ class RequestHandler {
             response_transform: responseTransform,
             streaming_mode: modelStreamingMode || this.config.streamingMode,
         };
+    }
+
+    _sanitizeNativeImageGenerationRequest(bodyObj, cleanPath) {
+        const isImageGenerationPath =
+            /\/models\/[^:]*(-image|imagen)[^:]*:(generateContent|streamGenerateContent)/i.test(cleanPath || "");
+        const generationConfig = bodyObj?.generationConfig;
+        if (!isImageGenerationPath || !generationConfig) {
+            return;
+        }
+
+        const imageConfig = generationConfig.imageConfig;
+        if (imageConfig && typeof imageConfig === "object") {
+            const validAspectRatios = new Set([
+                "1:1",
+                "1:4",
+                "1:8",
+                "2:3",
+                "3:2",
+                "3:4",
+                "4:1",
+                "4:3",
+                "4:5",
+                "5:4",
+                "8:1",
+                "9:16",
+                "16:9",
+                "21:9",
+            ]);
+            const aspectRatio = String(imageConfig.aspectRatio || "").trim();
+            if (aspectRatio && (aspectRatio.toLowerCase() === "auto" || !validAspectRatios.has(aspectRatio))) {
+                delete imageConfig.aspectRatio;
+                this.logger.debug(
+                    `[Proxy] Image model request: removed unsupported aspectRatio "${aspectRatio}" to use upstream auto.`
+                );
+            }
+            if (typeof imageConfig.imageSize === "string") {
+                imageConfig.imageSize = imageConfig.imageSize.trim().toUpperCase();
+            }
+            if (Object.keys(imageConfig).length === 0) {
+                delete generationConfig.imageConfig;
+            }
+        }
+
+        if (Number(generationConfig.candidateCount) > 1) {
+            generationConfig.candidateCount = 1;
+            this.logger.debug("[Proxy] Image model request: capped candidateCount to 1.");
+        }
     }
 
     _initializeProxyRequestAttempt(proxyRequest) {
