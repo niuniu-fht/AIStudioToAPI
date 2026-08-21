@@ -299,7 +299,7 @@ class RequestHandler {
         return !width || !height;
     }
 
-    _resolveOpenAIImageSizeConfig(size, targetModel) {
+    _resolveOpenAIImageSizeConfig(size) {
         const openaiSize = String(size || "1024x1024")
             .trim()
             .toLowerCase();
@@ -318,7 +318,7 @@ class RequestHandler {
             };
         }
 
-        if (this._isGemini31FlashImageModel(targetModel) && this._shouldUseUpstreamAutoImageSize(size)) {
+        if (this._shouldUseUpstreamAutoImageSize(size)) {
             return {
                 imageConfig: {},
                 mapped: false,
@@ -393,7 +393,7 @@ class RequestHandler {
             initialTarget.model,
             initialTarget.operation || "generateContent"
         );
-        const sizeConfig = this._resolveOpenAIImageSizeConfig(body.size, mappedTarget.model);
+        const sizeConfig = this._resolveOpenAIImageSizeConfig(body.size);
         const responseFormat = this._normalizeOpenAIImageResponseFormat(body.response_format);
         const n = Math.max(1, Math.min(Number.parseInt(body.n, 10) || 1, 4));
 
