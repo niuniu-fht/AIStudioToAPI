@@ -809,13 +809,10 @@ class RequestHandler {
         const base = this._buildGeminiRequestFromOpenAIImages(body);
         base.googleRequest.contents[0].parts = [{ text: prompt }, ...inlineImages.map(inlineData => ({ inlineData }))];
         const editImageConfig = base.googleRequest.generationConfig?.imageConfig;
-        if (editImageConfig) {
-            delete editImageConfig.imageSize;
+        if (editImageConfig && !editImageConfig.aspectRatio && !editImageConfig.imageSize) {
+            delete base.googleRequest.generationConfig.imageConfig;
+            base.aspectRatio = undefined;
             base.imageSize = null;
-            if (!editImageConfig.aspectRatio) {
-                delete base.googleRequest.generationConfig.imageConfig;
-                base.aspectRatio = undefined;
-            }
         }
 
         return {
