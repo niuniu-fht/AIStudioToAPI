@@ -3872,7 +3872,17 @@ class RequestHandler {
                             return;
                         }
                         try {
-                            res.write(`data: ${JSON.stringify(contentResponse)}\n\n`);
+                            const filteredContentResponse = this._isGeminiNativeImagePath(proxyRequest.path)
+                                ? this._filterGeminiNativeImageResponseObject(contentResponse)
+                                : contentResponse;
+                            if (
+                                this._isGeminiNativeImagePath(proxyRequest.path) &&
+                                this._collectGeminiInlineImages(filteredContentResponse).length === 0
+                            ) {
+                                this.logger.debug("[Proxy] Native image pseudo-stream content omitted because it contained no image.");
+                            } else {
+                                res.write(`data: ${JSON.stringify(filteredContentResponse)}\n\n`);
+                            }
                         } catch (writeError) {
                             this.logger.debug(
                                 `[Request] Failed to write Gemini content chunk to stream: ${writeError.message}`
@@ -4102,7 +4112,11 @@ class RequestHandler {
                         break;
                     }
                     try {
-                        res.write(dataMessage.data);
+                        const filteredStreamData = this._filterGeminiNativeImageStreamData(dataMessage.data, proxyRequest);
+                        if (!filteredStreamData) {
+                            continue;
+                        }
+                        res.write(filteredStreamData);
                     } catch (writeError) {
                         this.logger.debug(
                             `[Request] Failed to write Gemini data chunk to stream: ${writeError.message}`
@@ -4211,6 +4225,7 @@ class RequestHandler {
             }
 
             responseBodyBuffer = this._transformGeminiNativeResponseBuffer(responseBodyBuffer, req);
+            responseBodyBuffer = this._filterGeminiNativeImageResponseBuffer(responseBodyBuffer, proxyRequest);
 
             this._setResponseHeaders(res, headerMessage, req);
 
@@ -4384,6 +4399,115 @@ class RequestHandler {
         return storedCount;
     }
 
+    _isGeminiNativeImagePath(pathValue) {
+        return /\/models\/[^:]*(-image|imagen)[^:]*:(generateContent|streamGenerateContent)/i.test(pathValue || "");
+    }
+
+    _extractInlineImageParts(parts = []) {
+        const imageParts = [];
+        parts.forEach(part => {
+            if (part?.inlineData?.data) {
+                imageParts.push({
+                    inlineData: {
+                        data: part.inlineData.data,
+                        mimeType: part.inlineData.mimeType || "image/png",
+                    },
+                });
+                return;
+            }
+
+            if (typeof part?.text === "string") {
+                const dataUrlMatch = part.text.match(/data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\r\n]+)/);
+                if (dataUrlMatch) {
+                    imageParts.push({
+                        inlineData: {
+                            data: dataUrlMatch[2].replace(/\s+/g, ""),
+                            mimeType: dataUrlMatch[1],
+                        },
+                    });
+                }
+            }
+        });
+        return imageParts;
+    }
+
+    _filterGeminiNativeImageResponseObject(responseBody) {
+        if (!responseBody || typeof responseBody !== "object" || responseBody.error) {
+            return responseBody;
+        }
+
+        const filteredCandidates = [];
+        (responseBody.candidates || []).forEach((candidate, candidateIndex) => {
+            const parts = candidate?.content?.parts || [];
+            const imageParts = this._extractInlineImageParts(parts);
+            if (imageParts.length === 0) return;
+
+            const filteredCandidate = {
+                content: {
+                    parts: imageParts,
+                    role: candidate?.content?.role || "model",
+                },
+                index: Number.isInteger(candidate?.index) ? candidate.index : candidateIndex,
+            };
+
+            if (candidate?.finishReason) {
+                filteredCandidate.finishReason = candidate.finishReason;
+            }
+            if (candidate?.detailedFinishReason) {
+                filteredCandidate.detailedFinishReason = candidate.detailedFinishReason;
+            }
+
+            filteredCandidates.push(filteredCandidate);
+        });
+
+        return { candidates: filteredCandidates };
+    }
+
+    _filterGeminiNativeImageResponseBuffer(responseBodyBuffer, proxyRequest = {}) {
+        if (!this._isGeminiNativeImagePath(proxyRequest.path)) {
+            return responseBodyBuffer;
+        }
+
+        try {
+            const parsedBody = JSON.parse(responseBodyBuffer.toString());
+            const filteredBody = this._filterGeminiNativeImageResponseObject(parsedBody);
+            const imageCount = this._collectGeminiInlineImages(filteredBody).length;
+            this.logger.info(`[Proxy] Native image response filtered to image-only payload: images=${imageCount}.`);
+            return Buffer.from(JSON.stringify(filteredBody));
+        } catch (error) {
+            this.logger.warn(`[Proxy] Failed to filter native image response: ${error.message}`);
+            return responseBodyBuffer;
+        }
+    }
+
+    _filterGeminiNativeImageStreamData(data, proxyRequest = {}) {
+        if (!this._isGeminiNativeImagePath(proxyRequest.path) || !data) {
+            return data;
+        }
+
+        const raw = String(data);
+        const sseMatch = raw.match(/^data:\s*([\s\S]*?)\n\n$/);
+        const jsonText = sseMatch ? sseMatch[1] : raw.trim();
+        if (!jsonText || jsonText === "[DONE]") {
+            return raw;
+        }
+
+        try {
+            const parsedBody = JSON.parse(jsonText);
+            const filteredBody = this._filterGeminiNativeImageResponseObject(parsedBody);
+            const imageCount = this._collectGeminiInlineImages(filteredBody).length;
+            if (imageCount === 0) {
+                this.logger.debug("[Proxy] Native image stream chunk omitted because it contained no image.");
+                return "";
+            }
+            const filteredJson = JSON.stringify(filteredBody);
+            this.logger.info(`[Proxy] Native image stream chunk filtered to image-only payload: images=${imageCount}.`);
+            return sseMatch ? `data: ${filteredJson}\n\n` : `data: ${filteredJson}\n\n`;
+        } catch (error) {
+            this.logger.warn(`[Proxy] Failed to filter native image stream chunk: ${error.message}`);
+            return raw;
+        }
+    }
     _transformGeminiNativeResponseBuffer(responseBodyBuffer, req) {
         const shouldStripThoughtSignature = this._shouldStripThoughtSignature();
         const shouldReplaceImageData = this._isImageUrlResponseMode() && Boolean(req?.__openAIImagesRequestId);
