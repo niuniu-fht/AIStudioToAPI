@@ -5581,6 +5581,9 @@ class RequestHandler {
             return;
         }
 
+        generationConfig.responseModalities = ["IMAGE"];
+        this.logger.debug("[Proxy] Image model request: forced responseModalities to IMAGE.");
+
         if (generationConfig.responseFormat?.image) {
             generationConfig.imageConfig = {
                 ...generationConfig.responseFormat.image,
