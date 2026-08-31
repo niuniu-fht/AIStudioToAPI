@@ -11,7 +11,7 @@ const ALLOWED_IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gi
 const MB = 1024 * 1024;
 const DEFAULT_CLEANUP_THRESHOLD_MB = 10000;
 const DEFAULT_CLEANUP_TARGET_MB = 5000;
-const DEFAULT_CLEANUP_MAX_COUNT = 2000;
+const DEFAULT_CLEANUP_MAX_COUNT = 500;
 const DEFAULT_IMAGE_ROUTE = "/generated-images";
 
 class GeneratedImageService {
