@@ -353,6 +353,13 @@ class RequestHandler {
         return `${normalized.slice(0, maxLength)}...`;
     }
 
+    _ensureOpenAIImagePromptPrefix(prompt) {
+        const normalized = String(prompt || "").trim();
+        if (!normalized) return normalized;
+        if (normalized.startsWith("生成图片：")) return normalized;
+        return `生成图片：${normalized}`;
+    }
+
     _sanitizeDebugValue(value, depth = 0) {
         if (depth > 4) return "[MaxDepth]";
         if (Buffer.isBuffer(value)) return `[Buffer ${value.length} bytes]`;
@@ -386,7 +393,9 @@ class RequestHandler {
     _buildGeminiRequestFromOpenAIImages(openAIImagesBody) {
         const body = openAIImagesBody || {};
         const rawPrompt = body.prompt;
-        const prompt = Array.isArray(rawPrompt) ? rawPrompt.join("\n") : String(rawPrompt || "").trim();
+        const prompt = this._ensureOpenAIImagePromptPrefix(
+            Array.isArray(rawPrompt) ? rawPrompt.join("\n") : String(rawPrompt || "").trim()
+        );
         const rawModel = String(body.model || "gemini-3.1-flash-image").trim();
         const initialTarget = this._splitGenerationModelOperation(rawModel);
         const mappedTarget = this._resolveMappedGenerationTarget(
@@ -778,7 +787,9 @@ class RequestHandler {
         const multipart = contentType.includes("multipart/form-data") ? this._parseMultipartFormData(req) : null;
         const body = multipart ? multipart.fields : req.body || {};
         const rawPrompt = body.prompt;
-        const prompt = Array.isArray(rawPrompt) ? rawPrompt.join("\n") : String(rawPrompt || "").trim();
+        const prompt = this._ensureOpenAIImagePromptPrefix(
+            Array.isArray(rawPrompt) ? rawPrompt.join("\n") : String(rawPrompt || "").trim()
+        );
         const rawImages = [];
 
         if (multipart) {
@@ -907,6 +918,7 @@ class RequestHandler {
         if (statusCode === 503) {
             return format === "claude" ? "overloaded_error" : "service_unavailable";
         }
+        if (statusCode === 422) return "invalid_request_error";
         return "api_error";
     }
 
@@ -1872,6 +1884,12 @@ class RequestHandler {
                     req,
                     converted.responseFormat
                 );
+                if (!Array.isArray(openAIImagesResponse.data) || openAIImagesResponse.data.length === 0) {
+                    const noImageMessage = "upstream image response contained no image";
+                    this.logger.error(`${flowPrefix} ${noImageMessage}`);
+                    this._markTrackedResponseError(res, noImageMessage, 422);
+                    return this._sendErrorResponse(res, 422, noImageMessage, "invalid_request_error");
+                }
                 const b64Count = openAIImagesResponse.data.filter(item => item.b64_json).length;
                 const urlCount = openAIImagesResponse.data.filter(item => item.url).length;
                 this._updateStoredGeneratedImageMetadata(req, {
